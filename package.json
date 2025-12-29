@@ -1,0 +1,26 @@
+{
+  "name": "market-data-backend",
+  "version": "1.0.0",
+  "description": "Market data polling and API service for futures and crypto prices",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "market-data",
+    "crypto",
+    "futures",
+    "api",
+    "railway"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
