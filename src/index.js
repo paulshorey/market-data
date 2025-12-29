@@ -16,7 +16,7 @@ const pool = new Pool({
 });
 
 // Log which database URL is being used (without password)
-const dbUrl = getDatabaseUrl();
+const dbUrl = process.env.DATABASE_URL || "";
 const safeDbUrl = dbUrl.replace(/:[^:@]+@/, ":***@");
 console.log(`Database URL: ${safeDbUrl}`);
 
