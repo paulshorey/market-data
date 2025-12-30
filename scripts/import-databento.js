@@ -2,6 +2,7 @@
  * DataBento OHLCV Import Script
  *
  * Imports historical 1-minute candle data from DataBento export file into the database.
+ * Uses streaming to handle files of any size without memory limits.
  *
  * Usage:
  *   node --max-old-space-size=8192 scripts/import-databento.js /absolute/path/to/file.txt
@@ -10,7 +11,7 @@
  */
 
 const fs = require("fs");
-const path = require("path");
+const readline = require("readline");
 const { Pool } = require("pg");
 
 // Load environment variables from .env file
@@ -20,6 +21,7 @@ require("dotenv").config();
 const BATCH_SIZE = 1000; // Number of rows per INSERT batch (conservative for stability)
 const MAX_RETRIES = 3; // Retry failed batches
 const RETRY_DELAY_MS = 1000; // Wait between retries
+const MAX_PARSE_ERRORS = 10; // Stop if more than this many parse errors
 
 // Get data file from CLI argument (must be absolute path)
 const DATA_FILE = process.argv[2] || null;
@@ -125,6 +127,20 @@ function formatNumber(num) {
 }
 
 /**
+ * Format bytes in human readable form
+ */
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  } else if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  } else if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(2)} KB`;
+  }
+  return `${bytes} bytes`;
+}
+
+/**
  * Format duration in human readable form
  */
 function formatDuration(ms) {
@@ -169,8 +185,10 @@ async function main() {
   }
 
   const fileStat = fs.statSync(DATA_FILE);
+  const fileSize = fileStat.size;
   console.log(`📁 Input file: ${DATA_FILE}`);
-  console.log(`📊 File size: ${(fileStat.size / (1024 * 1024 * 1024)).toFixed(2)} GB`);
+  console.log(`📊 File size: ${formatBytes(fileSize)}`);
+  console.log(`📊 Max parse errors allowed: ${MAX_PARSE_ERRORS}`);
   console.log();
 
   // Test database connection
@@ -184,56 +202,58 @@ async function main() {
   }
   console.log();
 
-  // Read entire file into memory
-  console.log("📖 Reading file into memory...");
-  const startRead = Date.now();
-  const fileContent = fs.readFileSync(DATA_FILE, "utf-8");
-  const readTime = Date.now() - startRead;
-  console.log(`✅ File read complete (${formatDuration(readTime)})`);
-  console.log();
-
-  // Split into lines and filter empty lines
-  console.log("🔍 Parsing lines...");
-  const lines = fileContent.split("\n").filter((line) => line.trim().length > 0);
-  const totalLines = lines.length;
-  const maxParseErrors = Math.min(Math.floor(totalLines * 0.01), 10); // 1% or max 10
-  console.log(`📊 Total records to import: ${formatNumber(totalLines)}`);
-  console.log(`📊 Max parse errors allowed: ${formatNumber(maxParseErrors)}`);
-  console.log();
-
-  // Process in batches
+  // Process file using streaming (handles files of any size)
   console.log(`🚀 Starting import (batch size: ${formatNumber(BATCH_SIZE)})...`);
   console.log("─".repeat(60));
 
   const startImport = Date.now();
+  let linesRead = 0;
+  let bytesRead = 0;
   let imported = 0;
   let parseErrors = 0;
   let totalRetries = 0;
   let batchNumber = 0;
   let batch = [];
 
-  for (let i = 0; i < totalLines; i++) {
+  // Create read stream and readline interface
+  const fileStream = fs.createReadStream(DATA_FILE);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity, // Handle both \n and \r\n
+  });
+
+  // Process each line
+  for await (const line of rl) {
+    linesRead++;
+    // Track bytes read for progress (line length + newline character)
+    bytesRead += Buffer.byteLength(line, "utf8") + 1;
+
+    // Skip empty lines
+    if (!line.trim()) continue;
+
     // Parse the line (skip on parse error)
     let candle;
     try {
-      candle = parseCandle(lines[i]);
+      candle = parseCandle(line);
     } catch (parseError) {
       parseErrors++;
-      console.error(`\n⚠️  Parse error on line ${i + 1}: ${parseError.message}`);
-      console.error(`   Line content: ${lines[i].substring(0, 100)}${lines[i].length > 100 ? "..." : ""}`);
+      console.error(`\n⚠️  Parse error on line ${linesRead}: ${parseError.message}`);
+      console.error(`   Line content: ${line.substring(0, 100)}${line.length > 100 ? "..." : ""}`);
 
       // Check if too many parse errors
-      if (parseErrors > maxParseErrors) {
+      if (parseErrors > MAX_PARSE_ERRORS) {
         console.error("\n");
         console.error("═".repeat(60));
         console.error("🛑 FATAL: TOO MANY PARSE ERRORS");
         console.error("═".repeat(60));
-        console.error(`   Parse errors: ${parseErrors} (max allowed: ${maxParseErrors})`);
+        console.error(`   Parse errors: ${parseErrors} (max allowed: ${MAX_PARSE_ERRORS})`);
         console.error(`   This suggests a problem with the file format.`);
         console.error(`   Records imported before failure: ${formatNumber(imported)}`);
-        console.error(`   Failed at line: ${formatNumber(i + 1)}`);
+        console.error(`   Failed at line: ${formatNumber(linesRead)}`);
         console.error("═".repeat(60));
         console.error("\n💡 Check your data file format matches the expected NDJSON structure.\n");
+        rl.close();
+        fileStream.destroy();
         await pool.end();
         process.exit(1);
       }
@@ -261,23 +281,30 @@ async function main() {
         console.error(`   Error: ${batchError.message}`);
         console.error(`   Error code: ${batchError.code || "N/A"}`);
         console.error(`   Records imported before failure: ${formatNumber(imported)}`);
-        console.error(`   Last successful line: ~${formatNumber(i - batch.length)}`);
+        console.error(`   Failed at line: ~${formatNumber(linesRead)}`);
         console.error("═".repeat(60));
         console.error("\n💡 To resume: Fix the issue and re-run the script.");
         console.error("   The script uses UPSERT, so already-imported rows will be updated.\n");
+        rl.close();
+        fileStream.destroy();
         await pool.end();
         process.exit(1);
       }
 
-      // Progress update
-      const progress = ((imported / totalLines) * 100).toFixed(1);
+      // Progress update (based on bytes read)
+      const progress = fileSize > 0 ? ((bytesRead / fileSize) * 100).toFixed(1) : "0.0";
       const elapsed = Date.now() - startImport;
-      const rate = Math.round(imported / (elapsed / 1000));
-      const eta = Math.round((totalLines - imported) / rate);
+      const elapsedSec = elapsed / 1000 || 1; // Avoid division by zero
+      const rate = Math.round(imported / elapsedSec);
+      const bytesPerSec = bytesRead / elapsedSec;
+      const remainingBytes = Math.max(0, fileSize - bytesRead);
+      const etaSeconds = bytesPerSec > 0 ? remainingBytes / bytesPerSec : 0;
 
       process.stdout.write(
-        `\r📊 Progress: ${formatNumber(imported)}/${formatNumber(totalLines)} (${progress}%) | ` +
-          `Rate: ${formatNumber(rate)}/sec | ETA: ${formatDuration(eta * 1000)}   `
+        `\r📊 Progress: ${progress}% | ` +
+          `Imported: ${formatNumber(imported)} | ` +
+          `Rate: ${formatNumber(rate)}/sec | ` +
+          `ETA: ${formatDuration(etaSeconds * 1000)}   `
       );
     }
   }
@@ -308,9 +335,24 @@ async function main() {
   const totalTime = Date.now() - startImport;
   console.log("\n");
   console.log("─".repeat(60));
+
+  // Check if anything was imported
+  if (imported === 0) {
+    console.log("⚠️  Import completed but NO RECORDS were imported!");
+    console.log();
+    console.log("📊 Summary:");
+    console.log(`   • Lines processed: ${formatNumber(linesRead)}`);
+    console.log(`   • Parse errors: ${formatNumber(parseErrors)}`);
+    console.log();
+    console.log("💡 Check that your file contains valid NDJSON data.");
+    await pool.end();
+    process.exit(1);
+  }
+
   console.log("✅ Import complete!");
   console.log();
   console.log("📊 Summary:");
+  console.log(`   • Lines processed: ${formatNumber(linesRead)}`);
   console.log(`   • Records imported: ${formatNumber(imported)}`);
   console.log(`   • Batches processed: ${formatNumber(batchNumber)}`);
   console.log(`   • Retries needed: ${formatNumber(totalRetries)}`);
