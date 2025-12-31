@@ -7,14 +7,14 @@
  * Uses streaming to handle files of any size without memory limits.
  *
  * Usage:
- *   node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>
+ *   node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>
  *
  * Arguments:
  *   ticker - The ticker symbol to use (e.g., "ES", "NQ", "CL")
  *   file   - Absolute path to the data file (must start with /)
  *
  * Example:
- *   node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt
+ *   node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt
  *
  * PREREQUISITE: Create the table first:
  *
@@ -209,10 +209,10 @@ async function main() {
     console.error("❌ Error: Ticker symbol is required");
     console.error("");
     console.error("Usage:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>");
     console.error("");
     console.error("Example:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt");
     process.exit(1);
   }
 
@@ -221,10 +221,10 @@ async function main() {
     console.error("❌ Error: An absolute file path is required");
     console.error("");
     console.error("Usage:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>");
     console.error("");
     console.error("Example:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt");
     process.exit(1);
   }
 
