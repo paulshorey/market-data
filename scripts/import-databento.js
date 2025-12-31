@@ -1,13 +1,37 @@
 /**
- * DataBento OHLCV Import Script
+ * DataBento OHLCV Import Script - Continuous Contract Builder
  *
- * Imports historical 1-minute candle data from DataBento export file into the database.
+ * Imports historical 1-minute candle data and builds a continuous futures series
+ * by keeping only the highest-volume contract for each timestamp.
+ *
  * Uses streaming to handle files of any size without memory limits.
  *
  * Usage:
- *   node --max-old-space-size=8192 scripts/import-databento.js /absolute/path/to/file.txt
+ *   node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>
  *
- * The file path must be an absolute path (starting with /).
+ * Arguments:
+ *   ticker - The ticker symbol to use (e.g., "ES", "NQ", "CL")
+ *   file   - Absolute path to the data file (must start with /)
+ *
+ * Example:
+ *   node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt
+ *
+ * PREREQUISITE: Create the table first:
+ *
+ *   CREATE TABLE "candles-1m" (
+ *       time TIMESTAMPTZ NOT NULL,
+ *       ticker TEXT NOT NULL,
+ *       symbol TEXT NOT NULL,
+ *       open DOUBLE PRECISION NOT NULL,
+ *       high DOUBLE PRECISION NOT NULL,
+ *       low DOUBLE PRECISION NOT NULL,
+ *       close DOUBLE PRECISION NOT NULL,
+ *       volume DOUBLE PRECISION NOT NULL,
+ *       PRIMARY KEY (ticker, time)
+ *   );
+ *
+ *   -- For TimescaleDB (optional but recommended):
+ *   SELECT create_hypertable('candles-1m', by_range('time', INTERVAL '1 month'));
  */
 
 const fs = require("fs");
@@ -18,13 +42,14 @@ const { Pool } = require("pg");
 require("dotenv").config();
 
 // Configuration
-const BATCH_SIZE = 1000; // Number of rows per INSERT batch (conservative for stability)
+const BATCH_SIZE = 1000; // Number of rows per INSERT batch
 const MAX_RETRIES = 3; // Retry failed batches
 const RETRY_DELAY_MS = 1000; // Wait between retries
 const MAX_PARSE_ERRORS = 10; // Stop if more than this many parse errors
 
-// Get data file from CLI argument (must be absolute path)
-const DATA_FILE = process.argv[2] || null;
+// Get CLI arguments
+const TICKER = process.argv[2] || null;
+const DATA_FILE = process.argv[3] || null;
 
 // Database connection
 const pool = new Pool({
@@ -36,13 +61,21 @@ const pool = new Pool({
 
 /**
  * Parse a single NDJSON line into a candle record
+ * Skips spread contracts (symbols containing "-")
+ * Uses CLI-provided TICKER for ticker column, file's symbol for symbol column
  */
 function parseCandle(line) {
   const data = JSON.parse(line);
 
+  // Skip spread contracts (e.g., "ESM0-ESU0")
+  if (data.symbol.includes("-")) {
+    return null;
+  }
+
   return {
     time: data.hd.ts_event,
-    ticker: data.symbol,
+    ticker: TICKER, // CLI argument (e.g., "ES")
+    symbol: data.symbol, // File's symbol (e.g., "ESM0", "ESU0")
     open: parseFloat(data.open),
     high: parseFloat(data.high),
     low: parseFloat(data.low),
@@ -59,31 +92,35 @@ function sleep(ms) {
 }
 
 /**
- * Insert a batch of candles using UPSERT (ON CONFLICT DO UPDATE)
- * Includes retry logic for transient failures
+ * Insert a batch of candles using UPSERT with volume comparison
+ * Only updates if new volume > existing volume
  */
 async function insertBatch(candles, batchNumber = 0) {
   if (candles.length === 0) return { inserted: 0, retries: 0 };
 
-  // Build parameterized query for batch insert
+  // Build parameterized query for batch insert (8 columns now)
   const values = [];
   const placeholders = [];
 
   candles.forEach((candle, i) => {
-    const offset = i * 7;
-    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`);
-    values.push(candle.time, candle.ticker, candle.open, candle.high, candle.low, candle.close, candle.volume);
+    const offset = i * 8;
+    placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`);
+    values.push(candle.time, candle.ticker, candle.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
   });
 
+  // ON CONFLICT (ticker, time) - only compares within same ticker
+  // WHERE clause ensures we only update if new volume > existing volume
   const query = `
-    INSERT INTO "candles-1m" (time, ticker, open, high, low, close, volume)
+    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume)
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
+      symbol = EXCLUDED.symbol,
       open = EXCLUDED.open,
       high = EXCLUDED.high,
       low = EXCLUDED.low,
       close = EXCLUDED.close,
       volume = EXCLUDED.volume
+    WHERE EXCLUDED.volume > "candles-1m".volume
   `;
 
   // Retry logic for transient failures
@@ -162,19 +199,32 @@ function formatDuration(ms) {
  */
 async function main() {
   console.log("╔════════════════════════════════════════════════════════════╗");
-  console.log("║           DataBento OHLCV Import Script                    ║");
+  console.log("║     DataBento Continuous Contract Builder                  ║");
+  console.log("║     (Keeps highest-volume contract per timestamp)          ║");
   console.log("╚════════════════════════════════════════════════════════════╝");
   console.log();
+
+  // Check if ticker argument was provided
+  if (!TICKER) {
+    console.error("❌ Error: Ticker symbol is required");
+    console.error("");
+    console.error("Usage:");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>");
+    console.error("");
+    console.error("Example:");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt");
+    process.exit(1);
+  }
 
   // Check if file argument was provided and is absolute path
   if (!DATA_FILE || !DATA_FILE.startsWith("/")) {
     console.error("❌ Error: An absolute file path is required");
     console.error("");
     console.error("Usage:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js /absolute/path/to/file.txt");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js <ticker> <file>");
     console.error("");
     console.error("Example:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js /Users/you/data/ES-20251230-full-history-OHLCV.txt");
+    console.error("  node --max-old-space-size=8192 scripts/import-databento-continuous.js ES /Users/you/data/ES-full-history.txt");
     process.exit(1);
   }
 
@@ -186,9 +236,11 @@ async function main() {
 
   const fileStat = fs.statSync(DATA_FILE);
   const fileSize = fileStat.size;
+  console.log(`🏷️  Ticker: ${TICKER}`);
   console.log(`📁 Input file: ${DATA_FILE}`);
   console.log(`📊 File size: ${formatBytes(fileSize)}`);
   console.log(`📊 Max parse errors allowed: ${MAX_PARSE_ERRORS}`);
+  console.log(`📊 Spread contracts (with "-") will be skipped`);
   console.log();
 
   // Test database connection
@@ -200,6 +252,32 @@ async function main() {
     console.error(`❌ Database connection failed: ${error.message}`);
     process.exit(1);
   }
+
+  // Check if table exists
+  try {
+    await pool.query('SELECT 1 FROM "candles-1m" LIMIT 1');
+    console.log('✅ Table "candles-1m" exists');
+  } catch (error) {
+    console.error('❌ Table "candles-1m" does not exist!');
+    console.error("");
+    console.error("Create it first with:");
+    console.error("");
+    console.error('  CREATE TABLE "candles-1m" (');
+    console.error("      time TIMESTAMPTZ NOT NULL,");
+    console.error("      ticker TEXT NOT NULL,");
+    console.error("      symbol TEXT NOT NULL,");
+    console.error("      open DOUBLE PRECISION NOT NULL,");
+    console.error("      high DOUBLE PRECISION NOT NULL,");
+    console.error("      low DOUBLE PRECISION NOT NULL,");
+    console.error("      close DOUBLE PRECISION NOT NULL,");
+    console.error("      volume DOUBLE PRECISION NOT NULL,");
+    console.error("      PRIMARY KEY (ticker, time)");
+    console.error("  );");
+    console.error("");
+    console.error("  -- For TimescaleDB:");
+    console.error("  SELECT create_hypertable('candles-1m', by_range('time', INTERVAL '1 month'));");
+    process.exit(1);
+  }
   console.log();
 
   // Process file using streaming (handles files of any size)
@@ -209,7 +287,8 @@ async function main() {
   const startImport = Date.now();
   let linesRead = 0;
   let bytesRead = 0;
-  let imported = 0;
+  let processed = 0;
+  let skippedSpreads = 0;
   let parseErrors = 0;
   let totalRetries = 0;
   let batchNumber = 0;
@@ -248,7 +327,7 @@ async function main() {
         console.error("═".repeat(60));
         console.error(`   Parse errors: ${parseErrors} (max allowed: ${MAX_PARSE_ERRORS})`);
         console.error(`   This suggests a problem with the file format.`);
-        console.error(`   Records imported before failure: ${formatNumber(imported)}`);
+        console.error(`   Records processed before failure: ${formatNumber(processed)}`);
         console.error(`   Failed at line: ${formatNumber(linesRead)}`);
         console.error("═".repeat(60));
         console.error("\n💡 Check your data file format matches the expected NDJSON structure.\n");
@@ -261,6 +340,12 @@ async function main() {
       continue; // Skip this line, continue with next
     }
 
+    // Skip spread contracts (parseCandle returns null for spreads)
+    if (candle === null) {
+      skippedSpreads++;
+      continue;
+    }
+
     batch.push(candle);
 
     // When batch is full, insert it
@@ -268,7 +353,7 @@ async function main() {
       batchNumber++;
       try {
         const result = await insertBatch(batch, batchNumber);
-        imported += result.inserted;
+        processed += result.inserted;
         totalRetries += result.retries;
         batch = [];
       } catch (batchError) {
@@ -280,11 +365,11 @@ async function main() {
         console.error(`   Batch #${batchNumber} failed permanently`);
         console.error(`   Error: ${batchError.message}`);
         console.error(`   Error code: ${batchError.code || "N/A"}`);
-        console.error(`   Records imported before failure: ${formatNumber(imported)}`);
+        console.error(`   Records processed before failure: ${formatNumber(processed)}`);
         console.error(`   Failed at line: ~${formatNumber(linesRead)}`);
         console.error("═".repeat(60));
         console.error("\n💡 To resume: Fix the issue and re-run the script.");
-        console.error("   The script uses UPSERT, so already-imported rows will be updated.\n");
+        console.error("   The script uses volume-based UPSERT, so it's safe to re-run.\n");
         rl.close();
         fileStream.destroy();
         await pool.end();
@@ -295,15 +380,15 @@ async function main() {
       const progress = fileSize > 0 ? ((bytesRead / fileSize) * 100).toFixed(1) : "0.0";
       const elapsed = Date.now() - startImport;
       const elapsedSec = elapsed / 1000 || 1; // Avoid division by zero
-      const rate = Math.round(imported / elapsedSec);
+      const rate = Math.round(processed / elapsedSec);
       const bytesPerSec = bytesRead / elapsedSec;
       const remainingBytes = Math.max(0, fileSize - bytesRead);
       const etaSeconds = bytesPerSec > 0 ? remainingBytes / bytesPerSec : 0;
 
       process.stdout.write(
         `\r📊 Progress: ${progress}% | ` +
-          `Imported: ${formatNumber(imported)} | ` +
-          `Rate: ${formatNumber(rate)}/sec | ` +
+          `Processed: ${formatNumber(processed)} | ` +
+          `Spreads skipped: ${formatNumber(skippedSpreads)} | ` +
           `ETA: ${formatDuration(etaSeconds * 1000)}   `
       );
     }
@@ -314,7 +399,7 @@ async function main() {
     batchNumber++;
     try {
       const result = await insertBatch(batch, batchNumber);
-      imported += result.inserted;
+      processed += result.inserted;
       totalRetries += result.retries;
     } catch (batchError) {
       console.error("\n");
@@ -324,7 +409,7 @@ async function main() {
       console.error(`   Batch #${batchNumber} (final) failed permanently`);
       console.error(`   Error: ${batchError.message}`);
       console.error(`   Error code: ${batchError.code || "N/A"}`);
-      console.error(`   Records imported before failure: ${formatNumber(imported)}`);
+      console.error(`   Records processed before failure: ${formatNumber(processed)}`);
       console.error("═".repeat(60));
       console.error("\n💡 To resume: Fix the issue and re-run the script.\n");
       await pool.end();
@@ -336,12 +421,13 @@ async function main() {
   console.log("\n");
   console.log("─".repeat(60));
 
-  // Check if anything was imported
-  if (imported === 0) {
-    console.log("⚠️  Import completed but NO RECORDS were imported!");
+  // Check if anything was processed
+  if (processed === 0) {
+    console.log("⚠️  Import completed but NO RECORDS were processed!");
     console.log();
     console.log("📊 Summary:");
-    console.log(`   • Lines processed: ${formatNumber(linesRead)}`);
+    console.log(`   • Lines read: ${formatNumber(linesRead)}`);
+    console.log(`   • Spreads skipped: ${formatNumber(skippedSpreads)}`);
     console.log(`   • Parse errors: ${formatNumber(parseErrors)}`);
     console.log();
     console.log("💡 Check that your file contains valid NDJSON data.");
@@ -352,13 +438,17 @@ async function main() {
   console.log("✅ Import complete!");
   console.log();
   console.log("📊 Summary:");
-  console.log(`   • Lines processed: ${formatNumber(linesRead)}`);
-  console.log(`   • Records imported: ${formatNumber(imported)}`);
+  console.log(`   • Lines read: ${formatNumber(linesRead)}`);
+  console.log(`   • Records processed: ${formatNumber(processed)}`);
+  console.log(`   • Spread contracts skipped: ${formatNumber(skippedSpreads)}`);
   console.log(`   • Batches processed: ${formatNumber(batchNumber)}`);
   console.log(`   • Retries needed: ${formatNumber(totalRetries)}`);
   console.log(`   • Parse errors (skipped): ${formatNumber(parseErrors)}`);
   console.log(`   • Total time: ${formatDuration(totalTime)}`);
-  console.log(`   • Average rate: ${formatNumber(Math.round(imported / (totalTime / 1000)))}/sec`);
+  console.log(`   • Average rate: ${formatNumber(Math.round(processed / (totalTime / 1000)))}/sec`);
+  console.log();
+  console.log("💡 Note: Actual rows in table may be fewer than records processed,");
+  console.log("   because only the highest-volume contract is kept per timestamp.");
 
   // Cleanup
   await pool.end();

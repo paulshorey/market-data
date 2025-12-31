@@ -228,3 +228,5 @@ I have created views and continuous aggregate policy for several custom interval
 ## Summary
 
 Whenever rows are inserted, the database will automatically aggregate minutes into higher timeframe buckets.
+
+Finally, I added the optional column "symbol" to this table.
