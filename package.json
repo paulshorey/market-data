@@ -1,33 +1,34 @@
 {
-  "name": "market-data-backend",
+  "name": "price-api",
   "version": "1.0.0",
   "description": "Market data polling and API service for futures and crypto prices",
-  "main": "src/index.js",
+  "type": "module",
+  "main": "src/index.ts",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "build": "eslint src/",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --noEmit",
     "lint": "eslint src/",
     "import:databento": "node --max-old-space-size=8192 scripts/import-databento.js"
   },
-  "keywords": [
-    "market-data",
-    "crypto",
-    "futures",
-    "api",
-    "railway"
-  ],
   "author": "",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
-    "eslint": "^9.39.2"
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "eslint": "^9.39.2",
+    "typescript": "^5.6.0"
   }
 }

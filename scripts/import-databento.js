@@ -92,17 +92,38 @@ function sleep(ms) {
 }
 
 /**
+ * Deduplicate candles within a batch, keeping only highest volume per (ticker, time)
+ */
+function deduplicateBatch(candles) {
+  const byTime = new Map();
+
+  for (const candle of candles) {
+    const key = `${candle.ticker}|${candle.time}`;
+    const existing = byTime.get(key);
+
+    if (!existing || candle.volume > existing.volume) {
+      byTime.set(key, candle);
+    }
+  }
+
+  return Array.from(byTime.values());
+}
+
+/**
  * Insert a batch of candles using UPSERT with volume comparison
  * Only updates if new volume > existing volume
  */
 async function insertBatch(candles, batchNumber = 0) {
   if (candles.length === 0) return { inserted: 0, retries: 0 };
 
+  // Deduplicate within batch first (keep highest volume per timestamp)
+  const dedupedCandles = deduplicateBatch(candles);
+
   // Build parameterized query for batch insert (8 columns now)
   const values = [];
   const placeholders = [];
 
-  candles.forEach((candle, i) => {
+  dedupedCandles.forEach((candle, i) => {
     const offset = i * 8;
     placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`);
     values.push(candle.time, candle.ticker, candle.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
@@ -128,7 +149,7 @@ async function insertBatch(candles, batchNumber = 0) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await pool.query(query, values);
-      return { inserted: candles.length, retries: attempt - 1 };
+      return { inserted: dedupedCandles.length, retries: attempt - 1 };
     } catch (error) {
       lastError = error;
 

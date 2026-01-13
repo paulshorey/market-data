@@ -11,6 +11,7 @@ CREATE TABLE "candles-1m" (
     low DOUBLE PRECISION NOT NULL,
     close DOUBLE PRECISION NOT NULL,
     volume DOUBLE PRECISION NOT NULL,
+    symbol TEXT,
     PRIMARY KEY (ticker, time)
 );
 
@@ -225,8 +226,22 @@ SELECT add_continuous_aggregate_policy('candles_181m',
 
 I have created views and continuous aggregate policy for several custom intervals.
 
-## Summary
-
 Whenever rows are inserted, the database will automatically aggregate minutes into higher timeframe buckets.
 
-Finally, I added the optional column "symbol" to this table.
+## After adding data, run aggregation
+
+All aggregated timeframes:
+
+```
+CALL refresh_continuous_aggregate('candles_1h', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_1d', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_1w', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_109m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_13m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_181m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_29m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_3m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_59m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_5m', NULL, NULL);
+CALL refresh_continuous_aggregate('candles_7m', NULL, NULL);
+```
