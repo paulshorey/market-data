@@ -6,7 +6,7 @@ import { getSchema } from "./lib/schema.js";
 import { getCandles, getDateRange } from "./lib/candles.js";
 
 const app = express();
-const port = process.env.PORT || 8080;
+const port = Number(process.env.PORT) || 8080;
 
 app.use(cors());
 app.use(express.json());
