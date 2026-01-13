@@ -172,9 +172,7 @@ export class TbboAggregator {
   /**
    * Write candles to database using batch upsert
    */
-  private async writeCandlesToDb(
-    candles: Array<{ ticker: string; time: string; candle: CandleState }>
-  ): Promise<void> {
+  private async writeCandlesToDb(candles: Array<{ ticker: string; time: string; candle: CandleState }>): Promise<void> {
     if (candles.length === 0) return;
 
     try {
@@ -185,35 +183,29 @@ export class TbboAggregator {
 
       candles.forEach(({ ticker, time, candle }, i) => {
         const offset = i * 8;
-        placeholders.push(
-          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`
-        );
-        values.push(
-          time,
-          ticker,
-          candle.symbol,
-          candle.open,
-          candle.high,
-          candle.low,
-          candle.close,
-          candle.volume
-        );
+        placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`);
+        values.push(time, ticker, candle.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
       });
 
-      // ON CONFLICT DO NOTHING: If row already exists (from another stream instance), skip it
-      // This is safe because all instances receive the same trade data for the same minute
+      // ON CONFLICT: Update row if new volume is higher (keeps highest-volume data)
+      // This handles cases where multiple stream instances or delayed data arrives
       const query = `
         INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume)
         VALUES ${placeholders.join(", ")}
-        ON CONFLICT (ticker, time) DO NOTHING
+        ON CONFLICT (ticker, time) DO UPDATE SET
+          symbol = EXCLUDED.symbol,
+          open = EXCLUDED.open,
+          high = EXCLUDED.high,
+          low = EXCLUDED.low,
+          close = EXCLUDED.close,
+          volume = EXCLUDED.volume
+        WHERE EXCLUDED.volume > "candles-1m".volume
       `;
 
       await pool.query(query, values);
       this.candlesWritten += candles.length;
 
-      console.log(
-        `💾 Wrote ${candles.length} candles (${candles.map((c) => c.ticker).join(", ")})`
-      );
+      console.log(`💾 Wrote ${candles.length} candles (${candles.map((c) => c.ticker).join(", ")})`);
     } catch (err) {
       console.error("❌ Failed to write candles:", err);
       // Don't throw - we'll retry on next flush
