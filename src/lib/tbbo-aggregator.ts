@@ -200,17 +200,12 @@ export class TbboAggregator {
         );
       });
 
+      // ON CONFLICT DO NOTHING: If row already exists (from another stream instance), skip it
+      // This is safe because all instances receive the same trade data for the same minute
       const query = `
         INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume)
         VALUES ${placeholders.join(", ")}
-        ON CONFLICT (ticker, time) DO UPDATE SET
-          symbol = EXCLUDED.symbol,
-          open = EXCLUDED.open,
-          high = EXCLUDED.high,
-          low = EXCLUDED.low,
-          close = EXCLUDED.close,
-          volume = EXCLUDED.volume
-        WHERE EXCLUDED.volume > "candles-1m".volume
+        ON CONFLICT (ticker, time) DO NOTHING
       `;
 
       await pool.query(query, values);

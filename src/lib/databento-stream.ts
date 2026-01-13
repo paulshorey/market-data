@@ -12,12 +12,14 @@ import { createConnection, Socket } from "net";
 import { createHash } from "crypto";
 import { TbboAggregator, TbboRecord } from "./tbbo-aggregator.js";
 
-// Configuration from environment
-const DATABENTO_API_KEY = process.env.DATABENTO_API_KEY || "";
-const DATABENTO_DATASET = process.env.DATABENTO_DATASET || "GLBX.MDP3"; // CME Globex
-const DATABENTO_SYMBOLS = (process.env.DATABENTO_SYMBOLS || "ESH6").split(",");
+// Configuration from environment (all required - no defaults)
+const DATABENTO_API_KEY = process.env.DATABENTO_API_KEY;
+const DATABENTO_DATASET = process.env.DATABENTO_DATASET;
+const DATABENTO_SYMBOLS = process.env.DATABENTO_SYMBOLS?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 // stype_in: "raw_symbol" for specific contracts (ESH6), "parent" for parent symbols (ES.FUT)
-const DATABENTO_STYPE = process.env.DATABENTO_STYPE || "raw_symbol";
+const DATABENTO_STYPE = process.env.DATABENTO_STYPE;
 
 // Reconnection settings
 const MAX_RECONNECT_DELAY = 30000;
@@ -91,6 +93,11 @@ function handleControlMessage(message: string): void {
     // Wait for challenge
   } else if (fields.cram) {
     // Challenge received - send authentication
+    if (!DATABENTO_API_KEY || !DATABENTO_DATASET) {
+      console.error("❌ Cannot authenticate: missing API key or dataset");
+      state.socket?.end();
+      return;
+    }
     console.log("🔐 Received challenge, authenticating...");
     const authResponse = computeAuthResponse(fields.cram, DATABENTO_API_KEY);
 
@@ -125,7 +132,7 @@ function handleControlMessage(message: string): void {
  * Subscribe to TBBO schema for configured symbols
  */
 function subscribe(): void {
-  if (!state.socket) return;
+  if (!state.socket || !DATABENTO_SYMBOLS || !DATABENTO_STYPE) return;
 
   // Subscribe to TBBO (Top of Book on Trade)
   // stype_in: "raw_symbol" for specific contracts (ESH6), "parent" for parent symbols (ES.FUT)
@@ -180,8 +187,8 @@ const FIXED_PRICE_SCALE = 1e-9;
 
 // Databento record types (rtype)
 const RTYPE = {
-  MBP1: 1,             // Market by price (level 1) - includes TBBO trades
-  SYMBOL_MAPPING: 22,  // Maps parent symbol (ES.FUT) to specific contracts (ESH5)
+  MBP1: 1, // Market by price (level 1) - includes TBBO trades
+  SYMBOL_MAPPING: 22, // Maps parent symbol (ES.FUT) to specific contracts (ESH5)
   SUBSCRIPTION_MSG: 23, // Subscription confirmation/error
 };
 
@@ -213,7 +220,7 @@ function parseTbboRecord(json: string): TbboRecord | null {
     // Log raw JSON for first few actual trade records
     if (rawRecordsLogged < 5 && data.price && data.action === "T") {
       rawRecordsLogged++;
-      console.log(`🔍 Raw TBBO #${rawRecordsLogged}:`, JSON.stringify(data, null, 2).substring(0, 600));
+      // console.log(`🔍 Raw TBBO #${rawRecordsLogged}:`, JSON.stringify(data, null, 2).substring(0, 600));
     }
 
     // Only process trade actions (action="T")
@@ -328,18 +335,13 @@ function handleData(data: Buffer): void {
 
         // Log first few records to confirm data is flowing
         if (messageCount <= 5) {
-          console.log(
-            `📥 TBBO #${messageCount}: ${record.symbol} @ ${record.price} x${record.size} ` +
-              `(bid: ${record.bidPrice}, ask: ${record.askPrice})`
-          );
+          console.log(`📥 TBBO #${messageCount}: ${record.symbol} @ ${record.price} x${record.size} ` + `(bid: ${record.bidPrice}, ask: ${record.askPrice})`);
         }
 
         // Log periodic summary every 30 seconds
         if (Date.now() - lastMessageLogTime > 30000) {
           console.log(
-            `📊 Stream: ${messageCount.toLocaleString()} trades | ` +
-              `${skippedControlMessages} control msgs | ` +
-              `${skippedNoPrice} no-price events`
+            `📊 Stream: ${messageCount.toLocaleString()} trades | ` + `${skippedControlMessages} control msgs | ` + `${skippedNoPrice} no-price events`
           );
           lastMessageLogTime = Date.now();
         }
@@ -359,10 +361,7 @@ function scheduleReconnect(): void {
     return;
   }
 
-  const delay = Math.min(
-    INITIAL_RECONNECT_DELAY * Math.pow(2, state.reconnectAttempts),
-    MAX_RECONNECT_DELAY
-  );
+  const delay = Math.min(INITIAL_RECONNECT_DELAY * Math.pow(2, state.reconnectAttempts), MAX_RECONNECT_DELAY);
   state.reconnectAttempts++;
 
   console.log(`🔄 Reconnecting in ${delay}ms (attempt ${state.reconnectAttempts})...`);
@@ -373,8 +372,9 @@ function scheduleReconnect(): void {
  * Connect to Databento streaming gateway
  */
 function connect(): void {
-  if (!DATABENTO_API_KEY) {
-    console.warn("⚠️ DATABENTO_API_KEY not set, streaming disabled");
+  // Config already validated in startDatabentoStream, but be defensive
+  if (!DATABENTO_API_KEY || !DATABENTO_DATASET) {
+    console.warn("⚠️ Databento config not set, streaming disabled");
     return;
   }
 
@@ -444,20 +444,59 @@ function connect(): void {
 }
 
 /**
+ * Validate required environment variables
+ * Returns error message if validation fails, null if OK
+ */
+function validateConfig(): string | null {
+  const missing: string[] = [];
+
+  if (!DATABENTO_API_KEY) missing.push("DATABENTO_API_KEY");
+  if (!DATABENTO_DATASET) missing.push("DATABENTO_DATASET");
+  if (!DATABENTO_SYMBOLS || DATABENTO_SYMBOLS.length === 0) missing.push("DATABENTO_SYMBOLS");
+  if (!DATABENTO_STYPE) missing.push("DATABENTO_STYPE");
+
+  if (missing.length > 0) {
+    return `Missing required environment variables: ${missing.join(", ")}`;
+  }
+
+  // Validate stype is one of the allowed values (DATABENTO_STYPE is guaranteed non-null here)
+  if (!["raw_symbol", "parent"].includes(DATABENTO_STYPE!)) {
+    return `Invalid DATABENTO_STYPE: "${DATABENTO_STYPE}". Must be "raw_symbol" or "parent"`;
+  }
+
+  return null;
+}
+
+/**
  * Start the Databento streaming client
  */
 export function startDatabentoStream(): void {
-  const host = getHost(DATABENTO_DATASET);
-  const apiKeyPreview = DATABENTO_API_KEY
-    ? `${DATABENTO_API_KEY.slice(0, 6)}...${DATABENTO_API_KEY.slice(-5)}`
-    : "(not set)";
+  // Validate configuration before starting
+  const configError = validateConfig();
+  if (configError) {
+    console.error("═".repeat(50));
+    console.error("❌ Databento Stream Configuration Error");
+    console.error("═".repeat(50));
+    console.error(`   ${configError}`);
+    console.error("");
+    console.error("   Required environment variables:");
+    console.error("   - DATABENTO_API_KEY: Your Databento API key");
+    console.error("   - DATABENTO_DATASET: e.g., GLBX.MDP3 (CME Globex)");
+    console.error("   - DATABENTO_SYMBOLS: e.g., ESH6 or ESH6,NQH6");
+    console.error("   - DATABENTO_STYPE: raw_symbol or parent");
+    console.error("═".repeat(50));
+    return; // Don't start the stream
+  }
+
+  const host = getHost(DATABENTO_DATASET!);
+  const apiKeyPreview = `${DATABENTO_API_KEY!.slice(0, 6)}...${DATABENTO_API_KEY!.slice(-5)}`;
 
   console.log("═".repeat(50));
   console.log("📡 Starting Databento Live Stream");
   console.log("═".repeat(50));
   console.log(`   Host: ${host}:13000`);
   console.log(`   Dataset: ${DATABENTO_DATASET}`);
-  console.log(`   Symbols: ${DATABENTO_SYMBOLS.join(", ")}`);
+  console.log(`   Symbols: ${DATABENTO_SYMBOLS!.join(", ")}`);
   console.log(`   Symbol Type: ${DATABENTO_STYPE}`);
   console.log(`   Schema: TBBO (Top of Book on Trade)`);
   console.log(`   API Key: ${apiKeyPreview}`);
