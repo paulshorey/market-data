@@ -4,6 +4,7 @@ import cors from "cors";
 import { pool } from "./lib/db.js";
 import { getSchema } from "./lib/schema.js";
 import { getCandles, getDateRange } from "./lib/candles.js";
+import { startDatabentoStream, stopDatabentoStream, getStreamStatus } from "./lib/databento-stream.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 8080;
@@ -20,10 +21,13 @@ const DEFAULT_START_MS = new Date("2010-01-01").getTime();
 app.get("/health", async (_req: Request, res: Response) => {
   try {
     await pool.query("SELECT 1");
+    const streamStatus = getStreamStatus();
+
     res.status(200).json({
       status: "healthy",
       timestamp: new Date().toISOString(),
       database: "connected",
+      stream: streamStatus,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -157,17 +161,22 @@ app.listen(port, "::", () => {
   console.log(`   Health: http://localhost:${port}/health`);
   console.log(`   Schema: http://localhost:${port}/tables`);
   console.log(`   Candles: http://localhost:${port}/historical/candles?start=...&end=...`);
+
+  // Start the Databento live stream after API server is ready
+  startDatabentoStream();
 });
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received, shutting down gracefully...");
+  stopDatabentoStream(); // Stop stream and flush pending candles
   await pool.end();
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received, shutting down gracefully...");
+  stopDatabentoStream(); // Stop stream and flush pending candles
   await pool.end();
   process.exit(0);
 });
