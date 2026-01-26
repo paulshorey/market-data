@@ -2,11 +2,10 @@
  * TBBO Aggregator
  *
  * Aggregates real-time TBBO (trade) data into 1-minute OHLCV candles
- * and writes them to the database every 10 seconds.
+ * and writes them to the database every 1 second.
  *
  * Features:
- * - Volume Delta (VD): askVolume - bidVolume per minute
- * - Cumulative Volume Delta (CVD): running total of VD across all time
+ * - Cumulative Volume Delta (CVD): running total of (askVolume - bidVolume)
  * - Lee-Ready algorithm fallback for unknown trade sides
  * - Late trade rejection to prevent data corruption
  * - Graceful handling of DB write failures
@@ -146,7 +145,7 @@ export class TbboAggregator {
 
   /**
    * Flush completed candles to database and save in-progress candles.
-   * Called every 10 seconds.
+   * Called every 1 second.
    *
    * - Completed candles (past minutes): Written and removed from memory
    * - In-progress candles (current minute): Written but kept for continued aggregation
@@ -368,7 +367,7 @@ export class TbboAggregator {
       const { values, placeholders } = this.buildInsertParams(sorted);
 
       const query = `
-        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd)
+        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, cvd)
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -377,7 +376,6 @@ export class TbboAggregator {
           low = LEAST("candles-1m".low, EXCLUDED.low),
           close = EXCLUDED.close,
           volume = EXCLUDED.volume,
-          vd = EXCLUDED.vd,
           cvd = EXCLUDED.cvd
         WHERE EXCLUDED.volume >= "candles-1m".volume
       `;
@@ -405,6 +403,7 @@ export class TbboAggregator {
     const batchCvd: Map<string, number> = new Map();
 
     candles.forEach(({ ticker, time, candle }, i) => {
+      // Calculate VD locally (not saved to DB, only used for CVD)
       const vd = calculateVd(candle.askVolume, candle.bidVolume);
 
       // Use batch running total if available, otherwise use stored CVD
@@ -412,10 +411,10 @@ export class TbboAggregator {
       const cvd = baseCvd + vd;
       batchCvd.set(ticker, cvd);
 
-      const offset = i * 10;
+      const offset = i * 9;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
+          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9})`
       );
       values.push(
         time,
@@ -426,7 +425,6 @@ export class TbboAggregator {
         candle.low,
         candle.close,
         candle.volume,
-        vd,
         cvd
       );
     });

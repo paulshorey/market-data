@@ -566,10 +566,10 @@ export async function startDatabentoStream(): Promise<void> {
   state.aggregator = new TbboAggregator();
   await state.aggregator.initialize();
 
-  // Start periodic flush (every 10 seconds to ensure data is written)
+  // Start periodic flush (every 1 second to keep database current)
   setInterval(() => {
     state.aggregator?.flushCompleted();
-  }, 10000);
+  }, 1000);
 
   // Log status every 60 seconds if streaming but no trades
   setInterval(() => {
