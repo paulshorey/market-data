@@ -124,29 +124,43 @@ export class TbboAggregator {
 
   /**
    * Flush completed candles (older than current minute) to database
+   * and save in-progress candles without clearing them.
+   * 
+   * This allows us to update the database every 10 seconds while
+   * continuing to aggregate within the same minute.
    */
   async flushCompleted(): Promise<void> {
     const now = new Date();
     now.setSeconds(0, 0);
     const currentMinute = now.toISOString();
 
-    const toFlush: Array<{ key: string; ticker: string; time: string; candle: CandleState }> = [];
+    const toFlushCompleted: Array<{ key: string; ticker: string; time: string; candle: CandleState }> = [];
+    const toSaveInProgress: Array<{ key: string; ticker: string; time: string; candle: CandleState }> = [];
 
     for (const [key, candle] of this.candles) {
       const [ticker, time] = key.split("|");
-      // Only flush candles from completed minutes
       if (time < currentMinute) {
-        toFlush.push({ key, ticker, time, candle });
+        // Completed minute - will be removed after writing
+        toFlushCompleted.push({ key, ticker, time, candle });
+      } else {
+        // In-progress minute - save but don't remove
+        toSaveInProgress.push({ key, ticker, time, candle });
       }
     }
 
-    if (toFlush.length === 0) return;
+    // Write completed candles and remove them from memory
+    if (toFlushCompleted.length > 0) {
+      await this.writeCandlesToDb(toFlushCompleted);
+      for (const { key } of toFlushCompleted) {
+        this.candles.delete(key);
+      }
+      console.log(`✅ Flushed ${toFlushCompleted.length} completed candle(s)`);
+    }
 
-    await this.writeCandlesToDb(toFlush);
-
-    // Remove flushed candles from map
-    for (const { key } of toFlush) {
-      this.candles.delete(key);
+    // Save in-progress candles but keep them in memory for continued aggregation
+    if (toSaveInProgress.length > 0) {
+      await this.writeCandlesToDb(toSaveInProgress);
+      console.log(`🔄 Saved ${toSaveInProgress.length} in-progress candle(s)`);
     }
   }
 
@@ -171,13 +185,17 @@ export class TbboAggregator {
 
   /**
    * Write candles to database using batch upsert
+   * 
+   * For in-progress candles (updated every 10 seconds within the same minute):
+   * - Always update when new volume >= existing (accumulating trades)
+   * - Merge high/low to capture the full range
+   * - Keep original open, use latest close
    */
   private async writeCandlesToDb(candles: Array<{ ticker: string; time: string; candle: CandleState }>): Promise<void> {
     if (candles.length === 0) return;
 
     try {
       // Build batch insert with UPSERT
-      // Only update if new volume > existing (to keep highest-volume contract)
       const values: (string | number)[] = [];
       const placeholders: string[] = [];
 
@@ -187,25 +205,26 @@ export class TbboAggregator {
         values.push(time, ticker, candle.symbol, candle.open, candle.high, candle.low, candle.close, candle.volume);
       });
 
-      // ON CONFLICT: Update row if new volume is higher (keeps highest-volume data)
-      // This handles cases where multiple stream instances or delayed data arrives
+      // ON CONFLICT: Update when new volume >= existing (handles in-progress updates)
+      // - Keep original open (first trade of the minute)
+      // - Merge high/low to capture full range
+      // - Use latest close (most recent price)
+      // - Use new volume (accumulating)
       const query = `
         INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume)
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
           symbol = EXCLUDED.symbol,
-          open = EXCLUDED.open,
-          high = EXCLUDED.high,
-          low = EXCLUDED.low,
+          open = "candles-1m".open,
+          high = GREATEST("candles-1m".high, EXCLUDED.high),
+          low = LEAST("candles-1m".low, EXCLUDED.low),
           close = EXCLUDED.close,
           volume = EXCLUDED.volume
-        WHERE EXCLUDED.volume > "candles-1m".volume
+        WHERE EXCLUDED.volume >= "candles-1m".volume
       `;
 
       await pool.query(query, values);
       this.candlesWritten += candles.length;
-
-      console.log(`💾 Wrote ${candles.length} candles (${candles.map((c) => c.ticker).join(", ")})`);
     } catch (err) {
       console.error("❌ Failed to write candles:", err);
       // Don't throw - we'll retry on next flush
