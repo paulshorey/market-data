@@ -7,14 +7,14 @@
  * Uses streaming to handle files of any size without memory limits.
  *
  * Usage:
- *   node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>
+ *   npx tsx --max-old-space-size=8192 scripts/import-databento.ts <ticker> <file>
  *
  * Arguments:
  *   ticker - The ticker symbol to use (e.g., "ES", "NQ", "CL")
  *   file   - Absolute path to the data file (must start with /)
  *
  * Example:
- *   node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt
+ *   npx tsx --max-old-space-size=8192 scripts/import-databento.ts ES /Users/you/data/ES-full-history.txt
  *
  * PREREQUISITE: Create the table first:
  *
@@ -34,12 +34,37 @@
  *   SELECT create_hypertable('candles-1m', by_range('time', INTERVAL '1 month'));
  */
 
-const fs = require("fs");
-const readline = require("readline");
-const { Pool } = require("pg");
+import fs from "fs";
+import readline from "readline";
+import { Pool } from "pg";
+import "dotenv/config";
 
-// Load environment variables from .env file
-require("dotenv").config();
+// Types
+interface Candle {
+  time: string;
+  ticker: string;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+interface DataBentoRecord {
+  hd: { ts_event: string };
+  symbol: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+}
+
+interface BatchResult {
+  inserted: number;
+  retries: number;
+}
 
 // Configuration
 const BATCH_SIZE = 1000; // Number of rows per INSERT batch
@@ -64,8 +89,8 @@ const pool = new Pool({
  * Skips spread contracts (symbols containing "-")
  * Uses CLI-provided TICKER for ticker column, file's symbol for symbol column
  */
-function parseCandle(line) {
-  const data = JSON.parse(line);
+function parseCandle(line: string): Candle | null {
+  const data: DataBentoRecord = JSON.parse(line);
 
   // Skip spread contracts (e.g., "ESM0-ESU0")
   if (data.symbol.includes("-")) {
@@ -74,7 +99,7 @@ function parseCandle(line) {
 
   return {
     time: data.hd.ts_event,
-    ticker: TICKER, // CLI argument (e.g., "ES")
+    ticker: TICKER!, // CLI argument (e.g., "ES")
     symbol: data.symbol, // File's symbol (e.g., "ESM0", "ESU0")
     open: parseFloat(data.open),
     high: parseFloat(data.high),
@@ -87,15 +112,15 @@ function parseCandle(line) {
 /**
  * Sleep for a given number of milliseconds
  */
-function sleep(ms) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Deduplicate candles within a batch, keeping only highest volume per (ticker, time)
  */
-function deduplicateBatch(candles) {
-  const byTime = new Map();
+function deduplicateBatch(candles: Candle[]): Candle[] {
+  const byTime = new Map<string, Candle>();
 
   for (const candle of candles) {
     const key = `${candle.ticker}|${candle.time}`;
@@ -113,15 +138,15 @@ function deduplicateBatch(candles) {
  * Insert a batch of candles using UPSERT with volume comparison
  * Only updates if new volume > existing volume
  */
-async function insertBatch(candles, batchNumber = 0) {
+async function insertBatch(candles: Candle[], batchNumber = 0): Promise<BatchResult> {
   if (candles.length === 0) return { inserted: 0, retries: 0 };
 
   // Deduplicate within batch first (keep highest volume per timestamp)
   const dedupedCandles = deduplicateBatch(candles);
 
   // Build parameterized query for batch insert (8 columns now)
-  const values = [];
-  const placeholders = [];
+  const values: (string | number)[] = [];
+  const placeholders: string[] = [];
 
   dedupedCandles.forEach((candle, i) => {
     const offset = i * 8;
@@ -145,49 +170,49 @@ async function insertBatch(candles, batchNumber = 0) {
   `;
 
   // Retry logic for transient failures
-  let lastError;
+  let lastError: Error & { code?: string };
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       await pool.query(query, values);
       return { inserted: dedupedCandles.length, retries: attempt - 1 };
     } catch (error) {
-      lastError = error;
+      lastError = error as Error & { code?: string };
 
       // Don't retry on constraint/syntax errors - only transient connection issues
       const isTransient =
-        error.code === "ECONNRESET" ||
-        error.code === "ETIMEDOUT" ||
-        error.code === "57P01" || // admin_shutdown
-        error.code === "57P02" || // crash_shutdown
-        error.code === "57P03" || // cannot_connect_now
-        error.code === "08000" || // connection_exception
-        error.code === "08003" || // connection_does_not_exist
-        error.code === "08006"; // connection_failure
+        lastError.code === "ECONNRESET" ||
+        lastError.code === "ETIMEDOUT" ||
+        lastError.code === "57P01" || // admin_shutdown
+        lastError.code === "57P02" || // crash_shutdown
+        lastError.code === "57P03" || // cannot_connect_now
+        lastError.code === "08000" || // connection_exception
+        lastError.code === "08003" || // connection_does_not_exist
+        lastError.code === "08006"; // connection_failure
 
       if (!isTransient || attempt === MAX_RETRIES) {
         throw error;
       }
 
-      console.warn(`\n⚠️  Batch ${batchNumber} failed (attempt ${attempt}/${MAX_RETRIES}): ${error.message}`);
+      console.warn(`\n⚠️  Batch ${batchNumber} failed (attempt ${attempt}/${MAX_RETRIES}): ${lastError.message}`);
       console.warn(`   Retrying in ${RETRY_DELAY_MS * attempt}ms...`);
       await sleep(RETRY_DELAY_MS * attempt); // Exponential backoff
     }
   }
 
-  throw lastError;
+  throw lastError!;
 }
 
 /**
  * Format number with commas for display
  */
-function formatNumber(num) {
+function formatNumber(num: number): string {
   return num.toLocaleString();
 }
 
 /**
  * Format bytes in human readable form
  */
-function formatBytes(bytes) {
+function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   } else if (bytes >= 1024 * 1024) {
@@ -201,7 +226,7 @@ function formatBytes(bytes) {
 /**
  * Format duration in human readable form
  */
-function formatDuration(ms) {
+function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
@@ -218,7 +243,7 @@ function formatDuration(ms) {
 /**
  * Main import function
  */
-async function main() {
+async function main(): Promise<void> {
   console.log("╔════════════════════════════════════════════════════════════╗");
   console.log("║     DataBento Continuous Contract Builder                  ║");
   console.log("║     (Keeps highest-volume contract per timestamp)          ║");
@@ -230,10 +255,10 @@ async function main() {
     console.error("❌ Error: Ticker symbol is required");
     console.error("");
     console.error("Usage:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>");
+    console.error("  npx tsx --max-old-space-size=8192 scripts/import-databento.ts <ticker> <file>");
     console.error("");
     console.error("Example:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt");
+    console.error("  npx tsx --max-old-space-size=8192 scripts/import-databento.ts ES /Users/you/data/ES-full-history.txt");
     process.exit(1);
   }
 
@@ -242,10 +267,10 @@ async function main() {
     console.error("❌ Error: An absolute file path is required");
     console.error("");
     console.error("Usage:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js <ticker> <file>");
+    console.error("  npx tsx --max-old-space-size=8192 scripts/import-databento.ts <ticker> <file>");
     console.error("");
     console.error("Example:");
-    console.error("  node --max-old-space-size=8192 scripts/import-databento.js ES /Users/you/data/ES-full-history.txt");
+    console.error("  npx tsx --max-old-space-size=8192 scripts/import-databento.ts ES /Users/you/data/ES-full-history.txt");
     process.exit(1);
   }
 
@@ -270,7 +295,7 @@ async function main() {
     await pool.query("SELECT 1");
     console.log("✅ Database connected successfully");
   } catch (error) {
-    console.error(`❌ Database connection failed: ${error.message}`);
+    console.error(`❌ Database connection failed: ${(error as Error).message}`);
     process.exit(1);
   }
 
@@ -313,7 +338,7 @@ async function main() {
   let parseErrors = 0;
   let totalRetries = 0;
   let batchNumber = 0;
-  let batch = [];
+  let batch: Candle[] = [];
 
   // Create read stream and readline interface
   const fileStream = fs.createReadStream(DATA_FILE);
@@ -332,12 +357,12 @@ async function main() {
     if (!line.trim()) continue;
 
     // Parse the line (skip on parse error)
-    let candle;
+    let candle: Candle | null;
     try {
       candle = parseCandle(line);
     } catch (parseError) {
       parseErrors++;
-      console.error(`\n⚠️  Parse error on line ${linesRead}: ${parseError.message}`);
+      console.error(`\n⚠️  Parse error on line ${linesRead}: ${(parseError as Error).message}`);
       console.error(`   Line content: ${line.substring(0, 100)}${line.length > 100 ? "..." : ""}`);
 
       // Check if too many parse errors
@@ -384,8 +409,8 @@ async function main() {
         console.error("🛑 FATAL: BATCH INSERT FAILED AFTER ALL RETRIES");
         console.error("═".repeat(60));
         console.error(`   Batch #${batchNumber} failed permanently`);
-        console.error(`   Error: ${batchError.message}`);
-        console.error(`   Error code: ${batchError.code || "N/A"}`);
+        console.error(`   Error: ${(batchError as Error).message}`);
+        console.error(`   Error code: ${(batchError as Error & { code?: string }).code || "N/A"}`);
         console.error(`   Records processed before failure: ${formatNumber(processed)}`);
         console.error(`   Failed at line: ~${formatNumber(linesRead)}`);
         console.error("═".repeat(60));
@@ -428,8 +453,8 @@ async function main() {
       console.error("🛑 FATAL: FINAL BATCH INSERT FAILED AFTER ALL RETRIES");
       console.error("═".repeat(60));
       console.error(`   Batch #${batchNumber} (final) failed permanently`);
-      console.error(`   Error: ${batchError.message}`);
-      console.error(`   Error code: ${batchError.code || "N/A"}`);
+      console.error(`   Error: ${(batchError as Error).message}`);
+      console.error(`   Error code: ${(batchError as Error & { code?: string }).code || "N/A"}`);
       console.error(`   Records processed before failure: ${formatNumber(processed)}`);
       console.error("═".repeat(60));
       console.error("\n💡 To resume: Fix the issue and re-run the script.\n");

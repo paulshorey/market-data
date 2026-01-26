@@ -4,6 +4,7 @@ Databento a service which provides live and historical futures market data.
 
 Historical API: https://databento.com/docs/api-reference-historical?historical=http&live=http&reference=http
 Live API: https://databento.com/docs/api-reference-live?historical=http&live=http&reference=http
+TBBO data: https://databento.com/docs/schemas-and-data-formats/tbbo?historical=http&live=http&reference=http
 
 ## Download data file
 

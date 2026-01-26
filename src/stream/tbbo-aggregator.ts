@@ -5,7 +5,7 @@
  * and writes them to the database.
  */
 
-import { pool } from "./db.js";
+import { pool } from "../lib/db.js";
 
 export interface TbboRecord {
   timestamp: string; // Nanosecond epoch timestamp as string (e.g., "1768275460711927889")
@@ -118,7 +118,7 @@ export class TbboAggregator {
     console.log(
       `📊 Aggregator: ${this.recordsProcessed.toLocaleString()} trades → ` +
         `${this.candles.size} pending candles, ` +
-        `${this.candlesWritten.toLocaleString()} written`
+        `${this.candlesWritten.toLocaleString()} written`,
     );
   }
 
