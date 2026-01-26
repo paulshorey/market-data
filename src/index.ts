@@ -25,7 +25,7 @@ app.get("/historical/range", rangeHandler);
 /**
  * Start Server
  */
-app.listen(port, "::", () => {
+app.listen(port, "::", async () => {
   console.log(`🚀 Market Data API server running on port ${port}`);
   console.log(`   Environment: ${process.env.RAILWAY_ENVIRONMENT_NAME || "local"}`);
   console.log(`   Health: http://localhost:${port}/health`);
@@ -33,7 +33,8 @@ app.listen(port, "::", () => {
   console.log(`   Candles: http://localhost:${port}/historical/candles?start=...&end=...`);
 
   // Start the Databento live stream after API server is ready
-  startDatabentoStream();
+  // This loads CVD from database before processing any trades
+  await startDatabentoStream();
 });
 
 // Graceful shutdown

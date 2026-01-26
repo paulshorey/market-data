@@ -529,7 +529,7 @@ function validateConfig(): string | null {
 /**
  * Start the Databento streaming client
  */
-export function startDatabentoStream(): void {
+export async function startDatabentoStream(): Promise<void> {
   // Validate configuration before starting
   const configError = validateConfig();
   if (configError) {
@@ -562,7 +562,9 @@ export function startDatabentoStream(): void {
   console.log("═".repeat(50));
 
   // Initialize the aggregator (writes candles to database)
+  // This loads the last CVD values from the database to ensure continuity
   state.aggregator = new TbboAggregator();
+  await state.aggregator.initialize();
 
   // Start periodic flush (every 10 seconds to ensure data is written)
   setInterval(() => {
