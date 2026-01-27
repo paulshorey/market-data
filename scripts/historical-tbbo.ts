@@ -301,7 +301,7 @@ async function flushCandles(): Promise<void> {
  * Write a batch of candles to database
  */
 async function writeBatch(batch: CandleForDb[]): Promise<void> {
-  const values: (string | number)[] = [];
+  const values: (string | number | null)[] = [];
   const placeholders: string[] = [];
 
   // Track running CVD per ticker within this batch

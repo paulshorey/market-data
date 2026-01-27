@@ -25,7 +25,9 @@ TimescaleDB with candle tables per timeframe:
 - `candles_1d`
 - `candles_1w`
 
-Columns: time (ISO), ticker, symbol, open, high, low, close, volume, vd, cvd, momentum
+Base columns (all timeframes): time (ISO), ticker, symbol, open, high, low, close, volume
+
+Additional columns on `candles-1m` only: vd, cvd, momentum
 
 ## Order Flow Metrics
 
@@ -44,6 +46,7 @@ Order flow analysis from TBBO (Trade by Best Bid/Offer) data:
   - High magnitude = efficient price movement
   - Low magnitude with high |VD| = **absorption** (accumulation/distribution)
   - Used to detect areas where aggressive orders are being absorbed by limit orders
+  - When `VD = 0` (no aggressor imbalance), momentum is stored as `NULL` (mathematically undefined)
 
 ## Code Structure
 

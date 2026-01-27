@@ -400,10 +400,10 @@ export class TbboAggregator {
    * Build parameterized INSERT values with VD, CVD, and momentum calculation
    */
   private buildInsertParams(candles: CandleForDb[]): {
-    values: (string | number)[];
+    values: (string | number | null)[];
     placeholders: string[];
   } {
-    const values: (string | number)[] = [];
+    const values: (string | number | null)[] = [];
     const placeholders: string[] = [];
 
     // Track running CVD per ticker within this batch

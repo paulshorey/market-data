@@ -145,19 +145,20 @@ export function calculateVd(askVolume: number, bidVolume: number): number {
  * @param priceOpen - Opening price of the candle
  * @param priceClose - Closing price of the candle
  * @param volumeDelta - Volume delta (askVolume - bidVolume)
- * @returns Momentum value, or 0 if volume delta is zero
+ * @returns Momentum value, or null if volume delta is zero (mathematically undefined)
  */
 export function calculateMomentum(
   priceOpen: number,
   priceClose: number,
   volumeDelta: number
-): number {
-  const priceDelta = priceClose - priceOpen;
-
-  // No aggressor activity = no meaningful momentum
+): number | null {
+  // No aggressor activity = momentum is mathematically undefined
+  // Return null to distinguish from "zero momentum" (price didn't move)
   if (volumeDelta === 0) {
-    return 0;
+    return null;
   }
+
+  const priceDelta = priceClose - priceOpen;
 
   // Use absolute value of VD so momentum sign reflects price direction
   // This allows detecting divergence when VD and price move opposite directions
