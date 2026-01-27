@@ -12,6 +12,9 @@ CREATE TABLE "candles-1m" (
     close DOUBLE PRECISION NOT NULL,
     volume DOUBLE PRECISION NOT NULL,
     symbol TEXT,
+    vd DOUBLE PRECISION,              -- Volume Delta (askVolume - bidVolume)
+    cvd DOUBLE PRECISION,             -- Cumulative Volume Delta
+    momentum DOUBLE PRECISION,        -- Price efficiency: (close - open) / |vd|
     PRIMARY KEY (ticker, time)
 );
 

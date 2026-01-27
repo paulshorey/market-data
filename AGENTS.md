@@ -25,7 +25,25 @@ TimescaleDB with candle tables per timeframe:
 - `candles_1d`
 - `candles_1w`
 
-Columns: time (ISO), open, high, low, close, volume
+Columns: time (ISO), ticker, symbol, open, high, low, close, volume, vd, cvd, momentum
+
+## Order Flow Metrics
+
+Order flow analysis from TBBO (Trade by Best Bid/Offer) data:
+
+- **VD (Volume Delta)**: `askVolume - bidVolume` per candle
+  - Positive = more aggressive buying (bullish pressure)
+  - Negative = more aggressive selling (bearish pressure)
+
+- **CVD (Cumulative Volume Delta)**: Running sum of VD
+  - Tracks cumulative aggressor activity over time
+  - Divergence from price indicates potential reversal
+
+- **Momentum**: `(close - open) / |vd|` (price efficiency)
+  - Measures how much price moved per unit of aggressive volume
+  - High magnitude = efficient price movement
+  - Low magnitude with high |VD| = **absorption** (accumulation/distribution)
+  - Used to detect areas where aggressive orders are being absorbed by limit orders
 
 ## Code Structure
 

@@ -20,7 +20,7 @@ import "dotenv/config";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
-import { extractTicker, inferSideFromPrice, calculateVd } from "../src/stream/utils.js";
+import { extractTicker, inferSideFromPrice, calculateVd, calculateMomentum } from "../src/stream/utils.js";
 import type { CandleState, CandleForDb } from "../src/stream/types.js";
 
 // ============================================================================
@@ -315,10 +315,13 @@ async function writeBatch(batch: CandleForDb[]): Promise<void> {
     const cvd = baseCvd + vd;
     batchCvd.set(ticker, cvd);
 
-    const offset = i * 10;
+    // Calculate momentum: price efficiency relative to volume delta
+    const momentum = calculateMomentum(candle.open, candle.close, vd);
+
+    const offset = i * 11;
     placeholders.push(
       `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
+        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
     );
     values.push(
       time,
@@ -330,12 +333,13 @@ async function writeBatch(batch: CandleForDb[]): Promise<void> {
       candle.close,
       candle.volume,
       vd,
-      cvd
+      cvd,
+      momentum
     );
   });
 
   const query = `
-    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd)
+    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, momentum)
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
       symbol = EXCLUDED.symbol,
@@ -345,7 +349,8 @@ async function writeBatch(batch: CandleForDb[]): Promise<void> {
       close = EXCLUDED.close,
       volume = EXCLUDED.volume,
       vd = EXCLUDED.vd,
-      cvd = EXCLUDED.cvd
+      cvd = EXCLUDED.cvd,
+      momentum = EXCLUDED.momentum
     WHERE EXCLUDED.volume >= "candles-1m".volume
   `;
 
