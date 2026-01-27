@@ -280,17 +280,19 @@ async function flushCandles(): Promise<void> {
     return a.time.localeCompare(b.time);
   });
 
+  // Track running CVD across all batches to ensure correct accumulation
+  // This map persists across batches within this flush operation
+  const runningCvd: Map<string, number> = new Map();
+
   // Write in batches
   for (let i = 0; i < candleList.length; i += BATCH_SIZE) {
     const batch = candleList.slice(i, i + BATCH_SIZE);
-    await writeBatch(batch);
+    await writeBatch(batch, runningCvd);
   }
 
-  // Update CVD totals
-  for (const { ticker, candle } of candleList) {
-    const vd = calculateVd(candle.askVolume, candle.bidVolume);
-    const currentCvd = cvdByTicker.get(ticker) || 0;
-    cvdByTicker.set(ticker, currentCvd + vd);
+  // Update global CVD totals from the running CVD (which accumulated across all batches)
+  for (const [ticker, cvd] of runningCvd) {
+    cvdByTicker.set(ticker, cvd);
   }
 
   console.log(`💾 Flushed ${candles.size} candles to database`);
@@ -299,21 +301,20 @@ async function flushCandles(): Promise<void> {
 
 /**
  * Write a batch of candles to database
+ * @param batch - Array of candles to write
+ * @param runningCvd - Shared CVD accumulator across batches (mutated in place)
  */
-async function writeBatch(batch: CandleForDb[]): Promise<void> {
+async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>): Promise<void> {
   const values: (string | number | null)[] = [];
   const placeholders: string[] = [];
-
-  // Track running CVD per ticker within this batch
-  const batchCvd: Map<string, number> = new Map();
 
   batch.forEach(({ ticker, time, candle }, i) => {
     const vd = calculateVd(candle.askVolume, candle.bidVolume);
 
-    // Use batch running total if available, otherwise use stored CVD
-    const baseCvd = batchCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
+    // Use running total if available (from previous batches), otherwise use stored CVD
+    const baseCvd = runningCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
     const cvd = baseCvd + vd;
-    batchCvd.set(ticker, cvd);
+    runningCvd.set(ticker, cvd);
 
     // Calculate momentum: price efficiency relative to volume delta
     const momentum = calculateMomentum(candle.open, candle.close, vd);

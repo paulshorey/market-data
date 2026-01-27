@@ -14,7 +14,7 @@ Documentation about Railway is available locally in this codebase, inside the "d
 
 - `GET /health` - Health check for Railway
 - `GET /tables` - Database schema information
-- `GET /historical/candles?start=<ms>&end=<ms>&symbol=<optional>` - OHLCV candle data
+- `GET /historical/candles?start=<ms>&end=<ms>&ticker=<required>` - OHLCV candle data (returns `[timestamp_ms, open, high, low, close, volume]` tuples for Highcharts compatibility; order flow metrics vd/cvd/momentum not included)
 - `GET /historical/range` - Available date range in database
 
 ## Database Tables
