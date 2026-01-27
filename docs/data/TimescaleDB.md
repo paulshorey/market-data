@@ -12,6 +12,9 @@ CREATE TABLE "candles-1m" (
     close DOUBLE PRECISION NOT NULL,
     volume DOUBLE PRECISION NOT NULL,
     symbol TEXT,
+    vd DOUBLE PRECISION,              -- Volume Delta (askVolume - bidVolume)
+    cvd DOUBLE PRECISION,             -- Cumulative Volume Delta
+    momentum DOUBLE PRECISION,        -- Price efficiency: (close - open) / |vd|
     PRIMARY KEY (ticker, time)
 );
 
@@ -26,6 +29,35 @@ ALTER TABLE "candles-1m" SET (
 
 SELECT add_compression_policy('candles-1m', INTERVAL '1 month');
 ```
+
+### Migration: Adding Order Flow Columns
+
+For existing deployments, add the vd/cvd/momentum columns with the following statements:
+
+```sql
+-- Add order flow columns to existing candles-1m table
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS momentum DOUBLE PRECISION;
+```
+
+**Note on compressed chunks:** If you have compressed chunks, you may need to decompress them before adding columns, then recompress:
+
+```sql
+-- Check for compressed chunks
+SELECT show_chunks('candles-1m', older_than => INTERVAL '1 month');
+
+-- If needed, decompress specific chunks before altering
+SELECT decompress_chunk('<chunk_name>');
+
+-- After adding columns, recompress
+SELECT compress_chunk('<chunk_name>');
+```
+
+Alternatively, for large tables with many compressed chunks, consider:
+1. Creating a new table with the updated schema
+2. Migrating data in batches
+3. Renaming tables
 
 ### Index to extract times
 

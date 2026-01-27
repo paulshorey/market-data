@@ -20,7 +20,7 @@ import "dotenv/config";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
-import { extractTicker, inferSideFromPrice, calculateVd } from "../src/stream/utils.js";
+import { extractTicker, inferSideFromPrice, calculateVd, calculateMomentum } from "../src/stream/utils.js";
 import type { CandleState, CandleForDb } from "../src/stream/types.js";
 
 // ============================================================================
@@ -280,17 +280,19 @@ async function flushCandles(): Promise<void> {
     return a.time.localeCompare(b.time);
   });
 
+  // Track running CVD across all batches to ensure correct accumulation
+  // This map persists across batches within this flush operation
+  const runningCvd: Map<string, number> = new Map();
+
   // Write in batches
   for (let i = 0; i < candleList.length; i += BATCH_SIZE) {
     const batch = candleList.slice(i, i + BATCH_SIZE);
-    await writeBatch(batch);
+    await writeBatch(batch, runningCvd);
   }
 
-  // Update CVD totals
-  for (const { ticker, candle } of candleList) {
-    const vd = calculateVd(candle.askVolume, candle.bidVolume);
-    const currentCvd = cvdByTicker.get(ticker) || 0;
-    cvdByTicker.set(ticker, currentCvd + vd);
+  // Update global CVD totals from the running CVD (which accumulated across all batches)
+  for (const [ticker, cvd] of runningCvd) {
+    cvdByTicker.set(ticker, cvd);
   }
 
   console.log(`💾 Flushed ${candles.size} candles to database`);
@@ -299,26 +301,28 @@ async function flushCandles(): Promise<void> {
 
 /**
  * Write a batch of candles to database
+ * @param batch - Array of candles to write
+ * @param runningCvd - Shared CVD accumulator across batches (mutated in place)
  */
-async function writeBatch(batch: CandleForDb[]): Promise<void> {
-  const values: (string | number)[] = [];
+async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>): Promise<void> {
+  const values: (string | number | null)[] = [];
   const placeholders: string[] = [];
-
-  // Track running CVD per ticker within this batch
-  const batchCvd: Map<string, number> = new Map();
 
   batch.forEach(({ ticker, time, candle }, i) => {
     const vd = calculateVd(candle.askVolume, candle.bidVolume);
 
-    // Use batch running total if available, otherwise use stored CVD
-    const baseCvd = batchCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
+    // Use running total if available (from previous batches), otherwise use stored CVD
+    const baseCvd = runningCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
     const cvd = baseCvd + vd;
-    batchCvd.set(ticker, cvd);
+    runningCvd.set(ticker, cvd);
 
-    const offset = i * 10;
+    // Calculate momentum: price efficiency relative to volume delta
+    const momentum = calculateMomentum(candle.open, candle.close, vd);
+
+    const offset = i * 11;
     placeholders.push(
       `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
+        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
     );
     values.push(
       time,
@@ -330,12 +334,13 @@ async function writeBatch(batch: CandleForDb[]): Promise<void> {
       candle.close,
       candle.volume,
       vd,
-      cvd
+      cvd,
+      momentum
     );
   });
 
   const query = `
-    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd)
+    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, momentum)
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
       symbol = EXCLUDED.symbol,
@@ -345,7 +350,8 @@ async function writeBatch(batch: CandleForDb[]): Promise<void> {
       close = EXCLUDED.close,
       volume = EXCLUDED.volume,
       vd = EXCLUDED.vd,
-      cvd = EXCLUDED.cvd
+      cvd = EXCLUDED.cvd,
+      momentum = EXCLUDED.momentum
     WHERE EXCLUDED.volume >= "candles-1m".volume
   `;
 

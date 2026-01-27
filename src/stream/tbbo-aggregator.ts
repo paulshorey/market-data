@@ -5,7 +5,11 @@
  * and writes them to the database every 1 second.
  *
  * Features:
- * - Cumulative Volume Delta (CVD): running total of (askVolume - bidVolume)
+ * - Volume Delta (VD): per-candle (askVolume - bidVolume)
+ * - Cumulative Volume Delta (CVD): running total of VD across candles
+ * - Momentum: price efficiency metric (close - open) / |VD|
+ *   - High momentum = efficient price movement
+ *   - Low momentum = absorption (price didn't follow aggressive volume)
  * - Lee-Ready algorithm fallback for unknown trade sides
  * - Late trade rejection to prevent data corruption
  * - Graceful handling of DB write failures
@@ -20,6 +24,7 @@ import {
   extractTicker,
   inferSideFromPrice,
   calculateVd,
+  calculateMomentum,
 } from "./utils.js";
 
 // Re-export TbboRecord for consumers that import from this file
@@ -367,7 +372,7 @@ export class TbboAggregator {
       const { values, placeholders } = this.buildInsertParams(sorted);
 
       const query = `
-        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, cvd)
+        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, momentum)
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -376,7 +381,9 @@ export class TbboAggregator {
           low = LEAST("candles-1m".low, EXCLUDED.low),
           close = EXCLUDED.close,
           volume = EXCLUDED.volume,
-          cvd = EXCLUDED.cvd
+          vd = EXCLUDED.vd,
+          cvd = EXCLUDED.cvd,
+          momentum = EXCLUDED.momentum
         WHERE EXCLUDED.volume >= "candles-1m".volume
       `;
 
@@ -390,20 +397,20 @@ export class TbboAggregator {
   }
 
   /**
-   * Build parameterized INSERT values with correct CVD calculation
+   * Build parameterized INSERT values with VD, CVD, and momentum calculation
    */
   private buildInsertParams(candles: CandleForDb[]): {
-    values: (string | number)[];
+    values: (string | number | null)[];
     placeholders: string[];
   } {
-    const values: (string | number)[] = [];
+    const values: (string | number | null)[] = [];
     const placeholders: string[] = [];
 
     // Track running CVD per ticker within this batch
     const batchCvd: Map<string, number> = new Map();
 
     candles.forEach(({ ticker, time, candle }, i) => {
-      // Calculate VD locally (not saved to DB, only used for CVD)
+      // Calculate Volume Delta (VD)
       const vd = calculateVd(candle.askVolume, candle.bidVolume);
 
       // Use batch running total if available, otherwise use stored CVD
@@ -411,10 +418,15 @@ export class TbboAggregator {
       const cvd = baseCvd + vd;
       batchCvd.set(ticker, cvd);
 
-      const offset = i * 9;
+      // Calculate momentum: price efficiency relative to volume delta
+      // High momentum = price moved efficiently with aggressor activity
+      // Low momentum = absorption (price didn't follow despite volume)
+      const momentum = calculateMomentum(candle.open, candle.close, vd);
+
+      const offset = i * 11;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9})`
+          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
       );
       values.push(
         time,
@@ -425,7 +437,9 @@ export class TbboAggregator {
         candle.low,
         candle.close,
         candle.volume,
-        cvd
+        vd,
+        cvd,
+        momentum
       );
     });
 

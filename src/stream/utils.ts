@@ -108,14 +108,59 @@ export function inferSideFromPrice(
 
 /**
  * Calculate Volume Delta from ask and bid volumes
- * 
+ *
  * VD = askVolume - bidVolume
  * - Positive VD = More aggressive buying (bullish pressure)
  * - Negative VD = More aggressive selling (bearish pressure)
- * 
+ *
  * @param askVolume - Total volume traded at the ask (aggressive buys)
  * @param bidVolume - Total volume traded at the bid (aggressive sells)
  */
 export function calculateVd(askVolume: number, bidVolume: number): number {
   return askVolume - bidVolume;
+}
+
+// ============================================================================
+// Momentum / Absorption Utilities
+// ============================================================================
+
+/**
+ * Calculate Momentum from price change and volume delta
+ *
+ * Momentum = price_delta / |volume_delta|
+ *
+ * Measures price efficiency relative to aggressive volume activity:
+ * - Positive momentum: Price moved up (bullish)
+ * - Negative momentum: Price moved down (bearish)
+ * - High magnitude: Efficient price movement per unit of aggressive activity
+ * - Low magnitude (near zero) with high VD: Absorption - price didn't follow
+ *   aggressive activity, indicating accumulation/distribution zones
+ *
+ * Use cases:
+ * - Detect absorption: High |VD| but low |momentum| = orders being absorbed
+ * - Detect divergence: Price moving opposite to VD direction
+ * - Identify accumulation: Bearish VD but no price drop (sellers being absorbed)
+ * - Identify distribution: Bullish VD but no price rise (buyers being absorbed)
+ *
+ * @param priceOpen - Opening price of the candle
+ * @param priceClose - Closing price of the candle
+ * @param volumeDelta - Volume delta (askVolume - bidVolume)
+ * @returns Momentum value, or null if volume delta is zero (mathematically undefined)
+ */
+export function calculateMomentum(
+  priceOpen: number,
+  priceClose: number,
+  volumeDelta: number
+): number | null {
+  // No aggressor activity = momentum is mathematically undefined
+  // Return null to distinguish from "zero momentum" (price didn't move)
+  if (volumeDelta === 0) {
+    return null;
+  }
+
+  const priceDelta = priceClose - priceOpen;
+
+  // Use absolute value of VD so momentum sign reflects price direction
+  // This allows detecting divergence when VD and price move opposite directions
+  return priceDelta / Math.abs(volumeDelta);
 }
