@@ -20,7 +20,7 @@ import "dotenv/config";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
-import { extractTicker, inferSideFromPrice, calculateOrderFlowMetrics } from "../src/stream/utils.js";
+import { extractTicker, inferSideFromPrice, calculateOrderFlowMetrics, getLargeTradeThreshold } from "../src/stream/utils.js";
 import type { CandleState, CandleForDb } from "../src/stream/types.js";
 
 // ============================================================================
@@ -239,6 +239,10 @@ function addTrade(trade: NonNullable<ReturnType<typeof parseHistoricalTbbo>>): v
     ? (trade.askPrice + trade.bidPrice) / 2 
     : trade.price;
 
+  // Check if this is a large trade
+  const largeTradeThreshold = getLargeTradeThreshold(trade.ticker);
+  const isLargeTrade = trade.size >= largeTradeThreshold;
+
   const existing = candles.get(key);
 
   if (existing) {
@@ -265,6 +269,13 @@ function addTrade(trade: NonNullable<ReturnType<typeof parseHistoricalTbbo>>): v
 
     // VWAP tracking
     existing.sumPriceVolume += trade.price * trade.size;
+
+    // Large trade detection
+    existing.maxTradeSize = Math.max(existing.maxTradeSize, trade.size);
+    if (isLargeTrade) {
+      existing.largeTradeCount++;
+      existing.largeTradeVolume += trade.size;
+    }
   } else {
     candles.set(key, {
       // OHLCV
@@ -289,6 +300,11 @@ function addTrade(trade: NonNullable<ReturnType<typeof parseHistoricalTbbo>>): v
 
       // VWAP tracking
       sumPriceVolume: trade.price * trade.size,
+
+      // Large trade detection
+      maxTradeSize: trade.size,
+      largeTradeCount: isLargeTrade ? 1 : 0,
+      largeTradeVolume: isLargeTrade ? trade.size : 0,
 
       symbol: trade.symbol,
       tradeCount: 1,
@@ -362,6 +378,9 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       sumMidPrice: candle.sumMidPrice,
       sumPriceVolume: candle.sumPriceVolume,
       tradeCount: candle.tradeCount,
+      maxTradeSize: candle.maxTradeSize,
+      largeTradeCount: candle.largeTradeCount,
+      largeTradeVolume: candle.largeTradeVolume,
     });
 
     // Use running total if available (from previous batches), otherwise use stored CVD
@@ -369,13 +388,14 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
     const cvd = baseCvd + metrics.vd;
     runningCvd.set(ticker, cvd);
 
-    // 19 columns total
-    const offset = i * 19;
+    // 22 columns total
+    const offset = i * 22;
     placeholders.push(
       `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
         `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
         `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
-        `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19})`
+        `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
+        `$${offset + 21}, $${offset + 22})`
     );
     values.push(
       time,
@@ -395,6 +415,9 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       metrics.spreadBps,
       metrics.trades,
       metrics.avgTradeSize,
+      metrics.maxTradeSize,
+      metrics.bigTrades,
+      metrics.bigVolume,
       metrics.divergence,
       metrics.evr
     );
@@ -406,6 +429,7 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       vd, cvd, vd_ratio, book_imbalance,
       price_pct, vwap, spread_bps,
       trades, avg_trade_size,
+      max_trade_size, big_trades, big_volume,
       divergence, evr
     )
     VALUES ${placeholders.join(", ")}
@@ -425,6 +449,9 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       spread_bps = EXCLUDED.spread_bps,
       trades = EXCLUDED.trades,
       avg_trade_size = EXCLUDED.avg_trade_size,
+      max_trade_size = GREATEST("candles-1m".max_trade_size, EXCLUDED.max_trade_size),
+      big_trades = EXCLUDED.big_trades,
+      big_volume = EXCLUDED.big_volume,
       divergence = EXCLUDED.divergence,
       evr = EXCLUDED.evr
     WHERE EXCLUDED.volume >= "candles-1m".volume

@@ -12,6 +12,51 @@ export const MAX_TRADE_AGE_MS = 2 * 60 * 1000; // 2 minutes
 /** Futures month codes: F(Jan), G(Feb), H(Mar), J(Apr), K(May), M(Jun), N(Jul), Q(Aug), U(Sep), V(Oct), X(Nov), Z(Dec) */
 const FUTURES_MONTH_CODES = "FGHJKMNQUVXZ";
 
+// ============================================================================
+// Large Trade Detection Thresholds
+// ============================================================================
+
+/**
+ * Per-instrument thresholds for "large" trade detection.
+ * Trades >= this size are counted and tracked separately.
+ *
+ * These thresholds are based on CME block trade minimums and typical
+ * institutional activity levels. Trades at or above these sizes often
+ * indicate institutional positioning or algorithmic execution.
+ *
+ * Sources:
+ * - CME Block Trade Minimum for ES: 25 contracts
+ * - Typical retail: 1-10 contracts
+ * - Institutional: 25-100+ contracts
+ */
+export const LARGE_TRADE_THRESHOLDS: Record<string, number> = {
+  // E-mini S&P 500 - CME block minimum is 25
+  ES: 25,
+  // E-mini Nasdaq-100 - CME block minimum is 25
+  NQ: 25,
+  // E-mini Russell 2000 - CME block minimum is 25
+  RTY: 25,
+  // E-mini Dow - CME block minimum is 25
+  YM: 25,
+  // Crude Oil - CME block minimum is 25
+  CL: 25,
+  // Gold - CME block minimum is 25
+  GC: 25,
+  // Natural Gas - higher threshold due to different market dynamics
+  NG: 50,
+  // Default for unknown instruments
+  DEFAULT: 25,
+};
+
+/**
+ * Get the large trade threshold for a given ticker
+ * @param ticker - Parent ticker (e.g., "ES", "NQ")
+ * @returns Threshold in contracts
+ */
+export function getLargeTradeThreshold(ticker: string): number {
+  return LARGE_TRADE_THRESHOLDS[ticker] ?? LARGE_TRADE_THRESHOLDS.DEFAULT;
+}
+
 /** Regex to extract ticker from futures symbol (e.g., ESH5 -> ES) */
 const FUTURES_SYMBOL_REGEX = new RegExp(`^([A-Z]{1,3})[${FUTURES_MONTH_CODES}]\\d+$`);
 
@@ -153,6 +198,14 @@ export interface OrderFlowMetrics {
   trades: number;
   /** Average trade size (volume / trades) - indicates activity intensity */
   avgTradeSize: number;
+
+  // Large trade detection
+  /** Largest single trade size in this candle */
+  maxTradeSize: number;
+  /** Number of trades >= large trade threshold */
+  bigTrades: number;
+  /** Total volume from large trades */
+  bigVolume: number;
 
   // Absorption detection
   /** Divergence flag: 1=bullish (accumulation), -1=bearish (distribution), 0=none */
@@ -447,6 +500,11 @@ export interface OrderFlowInput {
 
   // Trade count
   tradeCount: number;
+
+  // Large trade detection
+  maxTradeSize: number;
+  largeTradeCount: number;
+  largeTradeVolume: number;
 }
 
 /**
@@ -484,6 +542,7 @@ export function calculateAvgTradeSize(volume: number, tradeCount: number): numbe
  * - Price: pricePct, vwap
  * - Liquidity: spreadBps
  * - Activity: trades, avgTradeSize
+ * - Large trades: maxTradeSize, bigTrades, bigVolume
  * - Absorption: divergence, evr
  *
  * @param input - All candle data needed for metric calculation
@@ -502,6 +561,9 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
     sumMidPrice,
     sumPriceVolume,
     tradeCount,
+    maxTradeSize,
+    largeTradeCount,
+    largeTradeVolume,
   } = input;
 
   // Aggressive order flow
@@ -522,6 +584,10 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
   const trades = tradeCount;
   const avgTradeSize = calculateAvgTradeSize(volume, tradeCount);
 
+  // Large trade metrics (passed through from aggregation)
+  const bigTrades = largeTradeCount;
+  const bigVolume = largeTradeVolume;
+
   // Absorption detection (using normalized values for better thresholding)
   const divergence = calculateDivergence(pricePct, vdRatio);
   const evr = calculateEvr(pricePct, vdRatio);
@@ -535,6 +601,9 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
     spreadBps,
     trades,
     avgTradeSize,
+    maxTradeSize,
+    bigTrades,
+    bigVolume,
     divergence,
     evr,
   };

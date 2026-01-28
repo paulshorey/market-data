@@ -26,6 +26,10 @@ CREATE TABLE "candles-1m" (
     -- Activity Metrics
     trades INTEGER,                   -- Number of trades in candle
     avg_trade_size DOUBLE PRECISION,  -- Average size per trade (volume/trades)
+    -- Large Trade Detection
+    max_trade_size DOUBLE PRECISION,  -- Largest single trade in candle
+    big_trades INTEGER,               -- Count of trades >= large threshold
+    big_volume DOUBLE PRECISION,      -- Total volume from large trades
     -- Absorption Detection
     divergence SMALLINT,              -- 1=bullish, -1=bearish, 0=none
     evr DOUBLE PRECISION,             -- Effort vs Result absorption score
@@ -67,6 +71,11 @@ ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS spread_bps DOUBLE PRECISION;
 -- Activity metrics
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS trades INTEGER;
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS avg_trade_size DOUBLE PRECISION;
+
+-- Large trade detection
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS max_trade_size DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS big_trades INTEGER;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS big_volume DOUBLE PRECISION;
 
 -- Absorption detection
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS divergence SMALLINT;

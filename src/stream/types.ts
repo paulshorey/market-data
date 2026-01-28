@@ -62,6 +62,14 @@ export interface CandleState {
   /** Sum of (price * size) for each trade (for VWAP calculation) */
   sumPriceVolume: number;
 
+  // Large trade detection
+  /** Largest single trade size in this candle */
+  maxTradeSize: number;
+  /** Number of trades >= large trade threshold */
+  largeTradeCount: number;
+  /** Total volume from large trades */
+  largeTradeVolume: number;
+
   /** Most recent contract symbol (for tracking active contract) */
   symbol: string;
   /** Number of trades in this candle */

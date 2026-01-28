@@ -27,6 +27,7 @@ import {
   inferSideFromPrice,
   calculateVd,
   calculateOrderFlowMetrics,
+  getLargeTradeThreshold,
 } from "./utils.js";
 
 // Re-export TbboRecord for consumers that import from this file
@@ -139,7 +140,7 @@ export class TbboAggregator {
     const key = `${ticker}|${minuteBucket}`;
     const { isAsk, isBid } = this.determineSide(record);
 
-    this.updateCandle(key, record, isAsk, isBid);
+    this.updateCandle(key, ticker, record, isAsk, isBid);
     this.recordsProcessed++;
     this.maybeLogStatus();
 
@@ -250,7 +251,7 @@ export class TbboAggregator {
   /**
    * Update or create a candle with trade data
    */
-  private updateCandle(key: string, record: TbboRecord, isAsk: boolean, isBid: boolean): void {
+  private updateCandle(key: string, ticker: string, record: TbboRecord, isAsk: boolean, isBid: boolean): void {
     const existing = this.candles.get(key);
 
     // Calculate spread and midpoint for this trade
@@ -260,6 +261,10 @@ export class TbboAggregator {
     const midPrice = record.askPrice > 0 && record.bidPrice > 0 
       ? (record.askPrice + record.bidPrice) / 2 
       : record.price;
+
+    // Check if this is a large trade
+    const largeTradeThreshold = getLargeTradeThreshold(ticker);
+    const isLargeTrade = record.size >= largeTradeThreshold;
 
     if (existing) {
       // OHLCV
@@ -285,6 +290,13 @@ export class TbboAggregator {
 
       // VWAP tracking
       existing.sumPriceVolume += record.price * record.size;
+
+      // Large trade detection
+      existing.maxTradeSize = Math.max(existing.maxTradeSize, record.size);
+      if (isLargeTrade) {
+        existing.largeTradeCount++;
+        existing.largeTradeVolume += record.size;
+      }
     } else {
       this.candles.set(key, {
         // OHLCV
@@ -309,6 +321,11 @@ export class TbboAggregator {
 
         // VWAP tracking
         sumPriceVolume: record.price * record.size,
+
+        // Large trade detection
+        maxTradeSize: record.size,
+        largeTradeCount: isLargeTrade ? 1 : 0,
+        largeTradeVolume: isLargeTrade ? record.size : 0,
 
         symbol: record.symbol,
         tradeCount: 1,
@@ -415,6 +432,7 @@ export class TbboAggregator {
           vd, cvd, vd_ratio, book_imbalance,
           price_pct, vwap, spread_bps,
           trades, avg_trade_size,
+          max_trade_size, big_trades, big_volume,
           divergence, evr
         )
         VALUES ${placeholders.join(", ")}
@@ -434,6 +452,9 @@ export class TbboAggregator {
           spread_bps = EXCLUDED.spread_bps,
           trades = EXCLUDED.trades,
           avg_trade_size = EXCLUDED.avg_trade_size,
+          max_trade_size = GREATEST("candles-1m".max_trade_size, EXCLUDED.max_trade_size),
+          big_trades = EXCLUDED.big_trades,
+          big_volume = EXCLUDED.big_volume,
           divergence = EXCLUDED.divergence,
           evr = EXCLUDED.evr
         WHERE EXCLUDED.volume >= "candles-1m".volume
@@ -475,6 +496,9 @@ export class TbboAggregator {
         sumMidPrice: candle.sumMidPrice,
         sumPriceVolume: candle.sumPriceVolume,
         tradeCount: candle.tradeCount,
+        maxTradeSize: candle.maxTradeSize,
+        largeTradeCount: candle.largeTradeCount,
+        largeTradeVolume: candle.largeTradeVolume,
       });
 
       // Use batch running total if available, otherwise use stored CVD
@@ -482,13 +506,14 @@ export class TbboAggregator {
       const cvd = baseCvd + metrics.vd;
       batchCvd.set(ticker, cvd);
 
-      // 19 columns total
-      const offset = i * 19;
+      // 22 columns total
+      const offset = i * 22;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
           `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
           `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
-          `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19})`
+          `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
+          `$${offset + 21}, $${offset + 22})`
       );
       values.push(
         time,
@@ -508,6 +533,9 @@ export class TbboAggregator {
         metrics.spreadBps,
         metrics.trades,
         metrics.avgTradeSize,
+        metrics.maxTradeSize,
+        metrics.bigTrades,
+        metrics.bigVolume,
         metrics.divergence,
         metrics.evr
       );

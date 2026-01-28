@@ -200,6 +200,64 @@ TypeScript with ES Modules. Uses `tsx` to run directly without build step.
 
 ---
 
+#### `max_trade_size` - Maximum Trade Size
+
+**Formula:** `MAX(trade.size)` for all trades in candle
+
+**What it measures:** The largest single trade that occurred during this candle.
+
+**Values:** Integer (contracts)
+
+**Use case:**
+- Detect block trades and institutional activity
+- Unusually large max_trade_size with low trade count = Single large order
+- Compare to avg_trade_size to see if there was an outlier
+
+---
+
+#### `big_trades` - Large Trade Count
+
+**Formula:** Count of trades where `size >= threshold`
+
+**What it measures:** Number of trades that exceeded the "large trade" threshold for this instrument.
+
+**Thresholds (based on CME block trade minimums):**
+- ES (E-mini S&P 500): 25 contracts
+- NQ (E-mini Nasdaq): 25 contracts
+- CL (Crude Oil): 25 contracts
+- GC (Gold): 25 contracts
+- Default: 25 contracts
+
+**Values:** Integer (count of large trades)
+
+**Use case:**
+- `big_trades > 0` = Institutional activity likely present
+- High big_trades = Multiple large participants active
+- Combine with `vd_ratio` to see if large trades were buying or selling
+
+---
+
+#### `big_volume` - Large Trade Volume
+
+**Formula:** `SUM(trade.size)` for trades where `size >= threshold`
+
+**What it measures:** Total volume from trades that exceeded the large trade threshold.
+
+**Values:** Integer (contracts)
+
+**Use case:**
+- Calculate `big_volume / volume` = % of volume from large trades
+- High percentage = Institutional dominance
+- Low percentage = Retail-driven activity
+- Compare big_volume side (using VD) to price direction for absorption signals
+
+**Combined analysis:**
+- High big_volume + VD positive + price up = Institutional buying driving price
+- High big_volume + VD positive + price flat/down = **Absorption** - institutions buying but price not moving
+- High big_volume + divergence flag = Strong institutional accumulation/distribution signal
+
+---
+
 #### `divergence` - Price-Delta Divergence Flag
 
 **Formula:**
