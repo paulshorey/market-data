@@ -306,3 +306,75 @@ else → 0
 - High |EVR| + divergence = 0 → Clean trend move, price following aggressor
 
 **Example:** If vd_ratio = 0.6 (60% buy imbalance) but price_pct = 5 (0.05% move), EVR = 5 / 60 = 0.08. This very low EVR indicates strong absorption - aggressive buyers are being absorbed by passive sellers.
+
+---
+
+#### `smp` - Smart Money Pressure (Composite Score)
+
+**Formula:** Multi-factor weighted composite
+
+```
+Base = vd_ratio × 50                        // Direction (-50 to +50)
+× (1 + big_volume/volume)                   // Institutional weight (1x to 2x)
+± book_imbalance × 15                       // Book confluence bonus/penalty
+± divergence × |vd_ratio| × 25              // Absorption adjustment
+× (1 - spread_penalty)                      // Confidence factor
+```
+
+**What it measures:** A single score representing institutional-weighted directional pressure. Combines aggressive flow (VD), passive flow (book imbalance), institutional participation (big trades), absorption detection (EVR/divergence), and market confidence (spread).
+
+**Values:** Integer from -100 to +100
+
+| Score Range | Interpretation |
+|-------------|----------------|
+| +70 to +100 | **Strong institutional buying** - High probability upward continuation |
+| +40 to +70 | **Moderate bullish** - Buyers in control, watch for resistance |
+| +20 to +40 | **Mild bullish** - Slight buying bias |
+| -20 to +20 | **Neutral** - Consolidation or potential reversal setup |
+| -40 to -20 | **Mild bearish** - Slight selling bias |
+| -70 to -40 | **Moderate bearish** - Sellers in control, watch for support |
+| -100 to -70 | **Strong institutional selling** - High probability downward continuation |
+
+**Key features:**
+
+1. **Institutional weighting:** Score is amplified when big trades are present (big_volume / volume ratio increases multiplier from 1x to 2x)
+
+2. **Book confluence:** Score boosted when passive order book confirms aggressive flow direction (both bullish or both bearish). Reduced when they conflict.
+
+3. **Absorption detection:** When divergence is detected (price moved against aggressor), score shifts toward the divergence direction, signaling potential reversal.
+
+4. **Efficiency factor:** Low EVR (absorption) dampens the score by 30%, indicating the market is absorbing rather than trending. High EVR boosts by 20%.
+
+5. **Confidence penalty:** Wide spread (> 5 bps) reduces score up to 30%, indicating uncertainty.
+
+**Trading signals:**
+
+- **Trend continuation:** High |SMP| + no divergence + narrow spread
+- **Potential reversal:** Moderate |SMP| + divergence flag + high big_volume %
+- **Accumulation zone:** Negative VD + positive SMP (due to divergence adjustment)
+- **Distribution zone:** Positive VD + negative SMP (due to divergence adjustment)
+
+**Example queries:**
+
+```sql
+-- Find strong institutional buying signals
+SELECT * FROM "candles-1m"
+WHERE ticker = 'ES' AND smp > 50
+ORDER BY time DESC;
+
+-- Find potential reversal setups (divergence with big trades)
+SELECT * FROM "candles-1m"
+WHERE ticker = 'ES' 
+  AND divergence != 0 
+  AND big_trades > 0
+ORDER BY time DESC;
+
+-- Calculate rolling average SMP for trend analysis
+SELECT 
+  time,
+  smp,
+  AVG(smp) OVER (ORDER BY time ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS smp_5m_avg
+FROM "candles-1m"
+WHERE ticker = 'ES'
+ORDER BY time DESC;
+```

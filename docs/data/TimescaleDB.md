@@ -33,6 +33,8 @@ CREATE TABLE "candles-1m" (
     -- Absorption Detection
     divergence SMALLINT,              -- 1=bullish, -1=bearish, 0=none
     evr DOUBLE PRECISION,             -- Effort vs Result absorption score
+    -- Composite Score
+    smp SMALLINT,                     -- Smart Money Pressure (-100 to +100)
     PRIMARY KEY (ticker, time)
 );
 
@@ -80,6 +82,9 @@ ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS big_volume DOUBLE PRECISION;
 -- Absorption detection
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS divergence SMALLINT;
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS evr DOUBLE PRECISION;
+
+-- Composite score
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS smp SMALLINT;
 
 -- If migrating from old schema with momentum column, drop it
 ALTER TABLE "candles-1m" DROP COLUMN IF EXISTS momentum;
