@@ -49,6 +49,15 @@ import {
  * Raw JSON structure from historical TBBO files
  * Supports both ISO timestamps and nanosecond epochs
  */
+interface HistoricalTbboLevel {
+  bid_px?: string | number;
+  ask_px?: string | number;
+  bid_sz?: number;
+  ask_sz?: number;
+  bid_ct?: number;
+  ask_ct?: number;
+}
+
 interface HistoricalTbboJson {
   // Timestamps can be ISO string or nanosecond epoch (string or number)
   ts_recv?: string | number; // "2025-12-01T00:00:00.003176304Z" or "1768275460711927889"
@@ -60,7 +69,7 @@ interface HistoricalTbboJson {
     instrument_id?: number;
   };
   action?: string; // "T" for trade
-  side?: string; // "A" or "B"
+  side?: string; // "A" or "B" or "N" (neutral/unknown)
   depth?: number;
   price: string | number; // "6853.000000000" or 6853.0
   size: number;
@@ -68,13 +77,16 @@ interface HistoricalTbboJson {
   ts_in_delta?: number;
   sequence?: number;
   symbol: string; // "ESZ5"
-  // Optional BBO fields (may not be present in trades-only files)
+  // BBO fields - can be at top level OR in levels array
+  // Top level (flat format)
   bid_px?: string | number;
   ask_px?: string | number;
   bidPrice?: number; // Alternative field name
   askPrice?: number; // Alternative field name
   bid_sz?: number;
   ask_sz?: number;
+  // Nested format (TBBO from Databento)
+  levels?: HistoricalTbboLevel[];
 }
 
 // ============================================================================
@@ -165,21 +177,31 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
       return null;
     }
 
-    // Parse bid/ask prices (can be string, number, or from alternative field names)
+    // Extract BBO from levels array if present (TBBO format from Databento)
+    // Otherwise fall back to top-level fields
+    const level = json.levels?.[0];
+
+    // Parse bid/ask prices - check levels array first, then top-level fields
+    const bidPxRaw = level?.bid_px ?? json.bid_px;
+    const askPxRaw = level?.ask_px ?? json.ask_px;
     const bidPrice =
       json.bidPrice ??
-      (json.bid_px
-        ? typeof json.bid_px === "number"
-          ? json.bid_px
-          : parseFloat(json.bid_px)
+      (bidPxRaw
+        ? typeof bidPxRaw === "number"
+          ? bidPxRaw
+          : parseFloat(bidPxRaw)
         : 0);
     const askPrice =
       json.askPrice ??
-      (json.ask_px
-        ? typeof json.ask_px === "number"
-          ? json.ask_px
-          : parseFloat(json.ask_px)
+      (askPxRaw
+        ? typeof askPxRaw === "number"
+          ? askPxRaw
+          : parseFloat(askPxRaw)
         : 0);
+
+    // Parse bid/ask sizes - check levels array first, then top-level fields
+    const bidSz = level?.bid_sz ?? json.bid_sz ?? 0;
+    const askSz = level?.ask_sz ?? json.ask_sz ?? 0;
 
     const ticker = extractTicker(json.symbol);
     const minuteBucket = toMinuteBucket(timestamp);
@@ -207,8 +229,8 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
       symbol: json.symbol,
       bidPrice: bidPrice || 0,
       askPrice: askPrice || 0,
-      bidSize: json.bid_sz || 0,
-      askSize: json.ask_sz || 0,
+      bidSize: bidSz,
+      askSize: askSz,
     };
   } catch {
     return null;

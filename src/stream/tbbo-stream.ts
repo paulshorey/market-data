@@ -192,26 +192,32 @@ function subscribe(): void {
 /**
  * Parse a TBBO JSON record from Databento
  *
- * JSON TBBO record structure:
+ * Real-time streaming uses fixed-point integers for prices (multiply by 1e-9).
+ * The bid/ask data is in the levels[0] array, similar to historical data.
+ *
+ * Expected JSON structure (see logged output for actual format):
  * {
- *   "hd": { "ts_event": "...", "rtype": 66, "publisher_id": 1, "instrument_id": 1234 },
- *   "price": "4500.25",        // Trade price
- *   "size": 5,                 // Trade size
- *   "action": "T",             // Trade action
- *   "side": "B",               // Aggressor side (Buy/Sell)
+ *   "hd": { "ts_event": "1234567890123456789", "rtype": 1, "publisher_id": 1, "instrument_id": 1234 },
+ *   "price": 6913500000000,       // Fixed-point price (× 1e-9 = 6913.50)
+ *   "size": 5,                    // Trade size
+ *   "action": "T",                // Trade action
+ *   "side": "A",                  // Aggressor side: "A" (ask/buy), "B" (bid/sell), "N" (unknown)
  *   "flags": 0,
  *   "depth": 0,
- *   "ts_recv": "...",
+ *   "ts_recv": "1234567890123456789",
  *   "ts_in_delta": 0,
  *   "sequence": 12345,
- *   "bid_px": "4500.00",       // Best bid price
- *   "ask_px": "4500.50",       // Best ask price
- *   "bid_sz": 100,             // Best bid size
- *   "ask_sz": 150,             // Best ask size
- *   "bid_ct": 10,              // Bid count
- *   "ask_ct": 15,              // Ask count
- *   "symbol": "ESH5"           // Specific contract symbol
+ *   "levels": [{                  // BBO data in levels array
+ *     "bid_px": 6913250000000,    // Fixed-point best bid
+ *     "ask_px": 6913750000000,    // Fixed-point best ask
+ *     "bid_sz": 100,              // Best bid size
+ *     "ask_sz": 150,              // Best ask size
+ *     "bid_ct": 10,               // Bid count
+ *     "ask_ct": 15                // Ask count
+ *   }]
  * }
+ *
+ * Note: symbol is resolved via instrument_id → symbol mapping (rtype=22 messages)
  */
 // Track skipped records for debugging
 let skippedNoPrice = 0;
@@ -263,7 +269,7 @@ function parseTbboRecord(json: string): TbboRecord | null {
     // Log raw JSON for first few actual trade records
     if (rawRecordsLogged < 5 && data.price && data.action === "T") {
       rawRecordsLogged++;
-      // console.log(`🔍 Raw TBBO #${rawRecordsLogged}:`, JSON.stringify(data, null, 2).substring(0, 600));
+      console.log(`🔍 Raw TBBO #${rawRecordsLogged}:`, JSON.stringify(data));
     }
 
     // Only process trade actions (action="T")

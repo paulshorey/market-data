@@ -1,24 +1,52 @@
-# Market Data back-end
+# Market Data
 
-This NodeJS app will run continuously, polling APIs every 10 seconds for new futures and crypto prices and statistics. It will filter, aggregate and format the data, and save the analysis to our own database.
+## Streaming data connection
 
-It will also serve the aggregated formatted data via APIs for use by web apps and bots.
+This server runs a socket connection to Databento to watch for latest futures trades TBBO data (trade by order). Each trade event includes info about its price/volume/aggressor/side. This server analyzes the data and saves multiple variants of it. This is later used for technical analysis and trading bot decisions.
 
-## Hosting Platform
+## Database columns
 
-[Railway](https://railway.com)
+Meta:
 
-Documentation about Railway is available locally in this codebase, inside the "docs" folder. When you need to know how to configure or deploy something, read the many .md files inside ./docs folder.
+- time (minute candle, ISO format)
+- ticker - short name (ES, GC, RTY)
+- symbol - name of the contract (ESH6, GCJ6, RTYG6)
 
-## Code Structure
+Price:
 
-TypeScript with ES Modules. Uses `tsx` to run directly without build step.
+- open
+- high
+- low
+- close
+- volume
 
-- `src/index.ts` - Express server and route handlers
-- `src/lib` - Library functions to help with APIs and algorithms
-- `src/stream` -
+Metrics:
 
-### Column Reference
+- vd
+- cvd
+- vd_ratio
+- price_pct
+- divergence
+- evr
+- book_imbalance
+- vwap
+- spread_bps
+- trades
+- avg_trade_size
+- max_trade_size
+- big_trades
+- big_volume
+- smp
+- vd_strength
+
+For each calculated metric we keep 4 OHLC variants. This allows them to be used in more types of algorithms than just the closing number. In the database, each metric is saved as 4 variants, with the suffix suffix:
+
+- metric + `_open`
+- metric + `_high`
+- metric + `_low`
+- metric + `_close`
+
+---
 
 #### `vd` - Volume Delta
 
@@ -209,6 +237,7 @@ TypeScript with ES Modules. Uses `tsx` to run directly without build step.
 **Values:** Integer (contracts)
 
 **Use case:**
+
 - Detect block trades and institutional activity
 - Unusually large max_trade_size with low trade count = Single large order
 - Compare to avg_trade_size to see if there was an outlier
@@ -222,6 +251,7 @@ TypeScript with ES Modules. Uses `tsx` to run directly without build step.
 **What it measures:** Number of trades that exceeded the "large trade" threshold for this instrument.
 
 **Thresholds (based on CME block trade minimums):**
+
 - ES (E-mini S&P 500): 25 contracts
 - NQ (E-mini Nasdaq): 25 contracts
 - CL (Crude Oil): 25 contracts
@@ -231,6 +261,7 @@ TypeScript with ES Modules. Uses `tsx` to run directly without build step.
 **Values:** Integer (count of large trades)
 
 **Use case:**
+
 - `big_trades > 0` = Institutional activity likely present
 - High big_trades = Multiple large participants active
 - Combine with `vd_ratio` to see if large trades were buying or selling
@@ -246,12 +277,14 @@ TypeScript with ES Modules. Uses `tsx` to run directly without build step.
 **Values:** Integer (contracts)
 
 **Use case:**
+
 - Calculate `big_volume / volume` = % of volume from large trades
 - High percentage = Institutional dominance
 - Low percentage = Retail-driven activity
 - Compare big_volume side (using VD) to price direction for absorption signals
 
 **Combined analysis:**
+
 - High big_volume + VD positive + price up = Institutional buying driving price
 - High big_volume + VD positive + price flat/down = **Absorption** - institutions buying but price not moving
 - High big_volume + divergence flag = Strong institutional accumulation/distribution signal
@@ -325,14 +358,14 @@ Base = vd_ratio × 50                        // Direction (-50 to +50)
 
 **Values:** Integer from -100 to +100
 
-| Score Range | Interpretation |
-|-------------|----------------|
-| +70 to +100 | **Strong institutional buying** - High probability upward continuation |
-| +40 to +70 | **Moderate bullish** - Buyers in control, watch for resistance |
-| +20 to +40 | **Mild bullish** - Slight buying bias |
-| -20 to +20 | **Neutral** - Consolidation or potential reversal setup |
-| -40 to -20 | **Mild bearish** - Slight selling bias |
-| -70 to -40 | **Moderate bearish** - Sellers in control, watch for support |
+| Score Range | Interpretation                                                            |
+| ----------- | ------------------------------------------------------------------------- |
+| +70 to +100 | **Strong institutional buying** - High probability upward continuation    |
+| +40 to +70  | **Moderate bullish** - Buyers in control, watch for resistance            |
+| +20 to +40  | **Mild bullish** - Slight buying bias                                     |
+| -20 to +20  | **Neutral** - Consolidation or potential reversal setup                   |
+| -40 to -20  | **Mild bearish** - Slight selling bias                                    |
+| -70 to -40  | **Moderate bearish** - Sellers in control, watch for support              |
 | -100 to -70 | **Strong institutional selling** - High probability downward continuation |
 
 **Key features:**
@@ -364,13 +397,13 @@ ORDER BY time DESC;
 
 -- Find potential reversal setups (divergence with big trades)
 SELECT * FROM "candles-1m"
-WHERE ticker = 'ES' 
-  AND divergence != 0 
+WHERE ticker = 'ES'
+  AND divergence != 0
   AND big_trades > 0
 ORDER BY time DESC;
 
 -- Calculate rolling average SMP for trend analysis
-SELECT 
+SELECT
   time,
   smp,
   AVG(smp) OVER (ORDER BY time ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS smp_5m_avg
@@ -378,6 +411,12 @@ FROM "candles-1m"
 WHERE ticker = 'ES'
 ORDER BY time DESC;
 ```
+
+**Implementation note:** The SMP OHLC values (smp_open, smp_high, smp_low, smp_close) are calculated without the divergence component, since divergence can only be meaningfully determined at the end of a candle when the final price change is known. The divergence metric is stored separately as a non-OHLC column. This means:
+
+- SMP OHLC tracks the evolution of institutional-weighted pressure based on VD ratio, book imbalance, big volume, EVR, spread, and momentum
+- The final `smp_close` and the standalone `divergence` column should be used together for complete analysis
+- For real-time trading signals, check both `smp_close > threshold` AND `divergence != 0` conditions
 
 ---
 
@@ -389,12 +428,12 @@ ORDER BY time DESC;
 
 **Values:** Positive decimal (typically 0.2 to 3.0)
 
-| Value | Interpretation |
-|-------|----------------|
-| > 1.5 | **Accelerating** - Current pressure is 50%+ above recent average |
-| 1.0 - 1.5 | **Steady** - Pressure is at or slightly above average |
-| 0.7 - 1.0 | **Decelerating** - Pressure is weakening |
-| < 0.7 | **Exhaustion** - Pressure has dropped significantly below average |
+| Value     | Interpretation                                                    |
+| --------- | ----------------------------------------------------------------- |
+| > 1.5     | **Accelerating** - Current pressure is 50%+ above recent average  |
+| 1.0 - 1.5 | **Steady** - Pressure is at or slightly above average             |
+| 0.7 - 1.0 | **Decelerating** - Pressure is weakening                          |
+| < 0.7     | **Exhaustion** - Pressure has dropped significantly below average |
 
 **Key insight:** This metric answers: "Is the buying/selling pressure getting stronger or weaker?"
 
@@ -405,11 +444,13 @@ ORDER BY time DESC;
 - **Breakout confirmation:** `vd_strength > 1.5` + high `big_trades` (institutions accelerating)
 
 **Combined with SMP:**
+
 - High SMP + high vd_strength = Strong trend, likely continuation
 - High SMP + low vd_strength = Trend may be exhausting
 - Low SMP + high vd_strength = Conflicting signals, watch for reversal
 
 **Example:**
+
 ```sql
 -- Find exhaustion setups (strong imbalance but fading pressure)
 SELECT time, close, vd_ratio, vd_strength, smp
@@ -420,4 +461,111 @@ WHERE ticker = 'ES'
 ORDER BY time DESC;
 ```
 
-**Note:** For historical data imports, `vd_strength` defaults to 1.0 since rolling history isn't available. Real-time streaming data will have accurate momentum values.
+## Historical data
+
+In addition to processing streaming real-time data, this repository also contains scripts which will be called independently in the CLI, to batch process large amounts of historical data.
+
+### TBBO (trades by order) data
+
+scripts/historical-tbbo.ts - will process a file similar to the below example.
+The real file will be very large, needs to be read in chunks!
+Notice this is not a valid JSON file. It is a text list of JSON objects (JSONL format).
+
+**Supported data formats:**
+
+1. **Databento TBBO format** (with `levels` array):
+
+```json
+{
+  "ts_recv": "2025-11-30T23:00:00.039353882Z",
+  "hd": { "ts_event": "2025-11-30T23:00:00.000000000Z", "rtype": 1, "publisher_id": 1, "instrument_id": 42140878 },
+  "action": "T",
+  "side": "N",
+  "depth": 0,
+  "price": "6913.500000000",
+  "size": 1,
+  "flags": 0,
+  "ts_in_delta": 13803,
+  "sequence": 3353,
+  "levels": [{ "bid_px": "6915.750000000", "ask_px": "6913.000000000", "bid_sz": 1, "ask_sz": 1, "bid_ct": 1, "ask_ct": 1 }],
+  "symbol": "ESH6"
+}
+```
+
+2. **Flat format** (bid/ask at top level):
+
+```json
+{
+  "timestamp": "2025-11-30T23:00:00.000Z",
+  "symbol": "ESH6",
+  "price": 6913.5,
+  "size": 1,
+  "side": "A",
+  "bid_px": 6915.75,
+  "ask_px": 6913.0,
+  "bid_sz": 1,
+  "ask_sz": 1
+}
+```
+
+**Key fields:**
+
+- `price`, `size`, `symbol` - Required trade data
+- `side` - "A" (ask/buy), "B" (bid/sell), or "N" (neutral/unknown). When unknown, Lee-Ready algorithm infers side from price vs midpoint
+- `bid_px`, `ask_px` - Best bid/ask prices (in `levels[0]` for Databento format, or at top level)
+- `bid_sz`, `ask_sz` - Best bid/ask sizes for order book imbalance calculation
+- Timestamps: supports ISO strings or nanosecond epochs in `hd.ts_event`, `ts_recv`, or `timestamp` fields
+
+**Example Databento TBBO lines:**
+
+```
+{"ts_recv":"2025-11-30T23:00:00.039353882Z","hd":{"ts_event":"2025-11-30T23:00:00.000000000Z","rtype":1,"publisher_id":1,"instrument_id":42140878},"action":"T","side":"N","depth":0,"price":"6913.500000000","size":1,"flags":0,"ts_in_delta":13803,"sequence":3353,"levels":[{"bid_px":"6915.750000000","ask_px":"6913.000000000","bid_sz":1,"ask_sz":1,"bid_ct":1,"ask_ct":1}],"symbol":"ESH6"}
+{"ts_recv":"2025-11-30T23:00:00.039411041Z","hd":{"ts_event":"2025-11-30T23:00:00.000000000Z","rtype":1,"publisher_id":1,"instrument_id":294973},"action":"T","side":"N","depth":0,"price":"6854.750000000","size":84,"flags":0,"ts_in_delta":14448,"sequence":3354,"levels":[{"bid_px":"6875.000000000","ask_px":"6820.000000000","bid_sz":9,"ask_sz":8,"bid_ct":1,"ask_ct":1}],"symbol":"ESZ5"}
+{"ts_recv":"2025-11-30T23:00:00.041192999Z","hd":{"ts_event":"2025-11-30T23:00:00.000000000Z","rtype":1,"publisher_id":1,"instrument_id":42007065},"action":"T","side":"N","depth":0,"price":"58.750000000","size":1,"flags":0,"ts_in_delta":13932,"sequence":3355,"levels":[{"bid_px":"58.750000000","ask_px":"58.750000000","bid_sz":1,"ask_sz":1,"bid_ct":1,"ask_ct":1}],"symbol":"ESZ5-ESH6"}
+```
+
+**Note:** Spread contracts (symbols containing "-" like "ESZ5-ESH6") are automatically skipped during processing.
+
+### Real-time streaming data
+
+Real-time data from Databento uses a similar structure but with **fixed-point integer prices** that must be multiplied by `1e-9`. The symbol is resolved via `instrument_id` lookup (from rtype=22 mapping messages).
+
+**Key differences from historical:**
+
+- Prices are fixed-point integers (e.g., `6913500000000` → `6913.50` after × 1e-9)
+- Symbol is NOT included directly - must be resolved from `instrument_id` via mapping
+- Timestamps are nanosecond epochs as integers/strings
+
+**Expected format (captured from `🔍 Raw TBBO` logs):**
+
+```json
+{
+  "hd": { "ts_event": 1732921200000000000, "rtype": 1, "publisher_id": 1, "instrument_id": 42140878 },
+  "action": "T",
+  "side": "A",
+  "depth": 0,
+  "price": 6913500000000,
+  "size": 5,
+  "flags": 0,
+  "ts_recv": 1732921200039353882,
+  "ts_in_delta": 13803,
+  "sequence": 3353,
+  "levels": [{ "bid_px": 6913250000000, "ask_px": 6913750000000, "bid_sz": 100, "ask_sz": 150, "bid_ct": 10, "ask_ct": 15 }]
+}
+```
+
+**To capture actual format:** Run the streaming service and check console output for `🔍 Raw TBBO #N:` log lines which print the first 5 trade records received.
+
+## TODO:
+
+### Historical `vd_strength`
+
+The `vd_strength` metric requires a rolling 5-minute history of VD values to calculate momentum. For real-time streaming data, this history is maintained by the aggregator. However, for historical batch processing, each candle is processed independently without maintaining rolling history, so `vd_strength` defaults to 1.0 (neutral). This means:
+
+- For real-time data: `vd_strength` accurately reflects momentum acceleration/deceleration
+- For historical data: `vd_strength` will always be 1.0 - use other metrics for momentum analysis
+- If historical momentum is needed, consider post-processing queries to calculate rolling averages
+
+**Solution:**
+`scripts/historical-tbbo.ts` should remember the last 5 minutes in memory.
+This will be no porblem, because the script will process a whole week or month of data at one time. When it restarts to work on the next file, there will be a 5-minute gap in vd_strength calculation, but that's ok because it will be very rare.
