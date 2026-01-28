@@ -253,7 +253,16 @@ export class TbboAggregator {
   private updateCandle(key: string, record: TbboRecord, isAsk: boolean, isBid: boolean): void {
     const existing = this.candles.get(key);
 
+    // Calculate spread and midpoint for this trade
+    const spread = record.askPrice > 0 && record.bidPrice > 0 
+      ? record.askPrice - record.bidPrice 
+      : 0;
+    const midPrice = record.askPrice > 0 && record.bidPrice > 0 
+      ? (record.askPrice + record.bidPrice) / 2 
+      : record.price;
+
     if (existing) {
+      // OHLCV
       existing.high = Math.max(existing.high, record.price);
       existing.low = Math.min(existing.low, record.price);
       existing.close = record.price;
@@ -261,19 +270,46 @@ export class TbboAggregator {
       existing.symbol = record.symbol;
       existing.tradeCount++;
 
+      // Aggressive order flow
       if (isAsk) existing.askVolume += record.size;
       else if (isBid) existing.bidVolume += record.size;
       else existing.unknownSideVolume += record.size;
+
+      // Passive order flow (book depth)
+      existing.sumBidDepth += record.bidSize || 0;
+      existing.sumAskDepth += record.askSize || 0;
+
+      // Spread tracking
+      existing.sumSpread += spread;
+      existing.sumMidPrice += midPrice;
+
+      // VWAP tracking
+      existing.sumPriceVolume += record.price * record.size;
     } else {
       this.candles.set(key, {
+        // OHLCV
         open: record.price,
         high: record.price,
         low: record.price,
         close: record.price,
         volume: record.size,
+
+        // Aggressive order flow
         askVolume: isAsk ? record.size : 0,
         bidVolume: isBid ? record.size : 0,
         unknownSideVolume: !isAsk && !isBid ? record.size : 0,
+
+        // Passive order flow (book depth)
+        sumBidDepth: record.bidSize || 0,
+        sumAskDepth: record.askSize || 0,
+
+        // Spread tracking
+        sumSpread: spread,
+        sumMidPrice: midPrice,
+
+        // VWAP tracking
+        sumPriceVolume: record.price * record.size,
+
         symbol: record.symbol,
         tradeCount: 1,
       });
@@ -374,7 +410,13 @@ export class TbboAggregator {
       const { values, placeholders } = this.buildInsertParams(sorted);
 
       const query = `
-        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, vd_ratio, price_pct, divergence, evr)
+        INSERT INTO "candles-1m" (
+          time, ticker, symbol, open, high, low, close, volume,
+          vd, cvd, vd_ratio, book_imbalance,
+          price_pct, vwap, spread_bps,
+          trades, avg_trade_size,
+          divergence, evr
+        )
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -386,7 +428,12 @@ export class TbboAggregator {
           vd = EXCLUDED.vd,
           cvd = EXCLUDED.cvd,
           vd_ratio = EXCLUDED.vd_ratio,
+          book_imbalance = EXCLUDED.book_imbalance,
           price_pct = EXCLUDED.price_pct,
+          vwap = EXCLUDED.vwap,
+          spread_bps = EXCLUDED.spread_bps,
+          trades = EXCLUDED.trades,
+          avg_trade_size = EXCLUDED.avg_trade_size,
           divergence = EXCLUDED.divergence,
           evr = EXCLUDED.evr
         WHERE EXCLUDED.volume >= "candles-1m".volume
@@ -416,23 +463,32 @@ export class TbboAggregator {
 
     candles.forEach(({ ticker, time, candle }, i) => {
       // Calculate all order flow metrics
-      const metrics = calculateOrderFlowMetrics(
-        candle.open,
-        candle.close,
-        candle.askVolume,
-        candle.bidVolume
-      );
+      const metrics = calculateOrderFlowMetrics({
+        open: candle.open,
+        close: candle.close,
+        volume: candle.volume,
+        askVolume: candle.askVolume,
+        bidVolume: candle.bidVolume,
+        sumBidDepth: candle.sumBidDepth,
+        sumAskDepth: candle.sumAskDepth,
+        sumSpread: candle.sumSpread,
+        sumMidPrice: candle.sumMidPrice,
+        sumPriceVolume: candle.sumPriceVolume,
+        tradeCount: candle.tradeCount,
+      });
 
       // Use batch running total if available, otherwise use stored CVD
       const baseCvd = batchCvd.get(ticker) ?? (this.cvdByTicker.get(ticker) || 0);
       const cvd = baseCvd + metrics.vd;
       batchCvd.set(ticker, cvd);
 
-      const offset = i * 14;
+      // 19 columns total
+      const offset = i * 19;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
           `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
-          `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`
+          `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
+          `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19})`
       );
       values.push(
         time,
@@ -446,7 +502,12 @@ export class TbboAggregator {
         metrics.vd,
         cvd,
         metrics.vdRatio,
+        metrics.bookImbalance,
         metrics.pricePct,
+        metrics.vwap,
+        metrics.spreadBps,
+        metrics.trades,
+        metrics.avgTradeSize,
         metrics.divergence,
         metrics.evr
       );

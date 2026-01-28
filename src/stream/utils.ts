@@ -128,12 +128,33 @@ export function calculateVd(askVolume: number, bidVolume: number): number {
  * Order flow metrics calculated from TBBO data
  */
 export interface OrderFlowMetrics {
+  // Aggressive order flow (market orders hitting limit orders)
   /** Volume Delta: askVolume - bidVolume */
   vd: number;
   /** VD Ratio: VD / classified volume, bounded -1 to +1 */
   vdRatio: number;
+
+  // Passive order flow (limit orders waiting in book)
+  /** Book Imbalance: (bidDepth - askDepth) / (bidDepth + askDepth), bounded -1 to +1 */
+  bookImbalance: number;
+
+  // Price metrics
   /** Price change as percentage (basis points, 100 = 1%) */
   pricePct: number;
+  /** VWAP: Volume-weighted average price for this candle */
+  vwap: number;
+
+  // Liquidity metrics
+  /** Average spread in basis points (normalized for cross-instrument comparison) */
+  spreadBps: number;
+
+  // Activity metrics
+  /** Number of trades in this candle */
+  trades: number;
+  /** Average trade size (volume / trades) - indicates activity intensity */
+  avgTradeSize: number;
+
+  // Absorption detection
   /** Divergence flag: 1=bullish (accumulation), -1=bearish (distribution), 0=none */
   divergence: -1 | 0 | 1;
   /** Effort vs Result: absorption score. null = no meaningful imbalance, 0 = strong absorption */
@@ -170,6 +191,120 @@ export function calculateVdRatio(askVolume: number, bidVolume: number): number {
   return vd / classifiedVolume;
 }
 
+// ============================================================================
+// Passive Order Flow (Book Imbalance)
+// ============================================================================
+
+/**
+ * Calculate Book Imbalance (Order Book Imbalance / OBI)
+ *
+ * Book Imbalance = (sumBidDepth - sumAskDepth) / (sumBidDepth + sumAskDepth)
+ *
+ * Measures the PASSIVE order imbalance - limit orders waiting in the book.
+ * This is fundamentally different from VD which measures AGGRESSIVE order flow.
+ *
+ * Bounded between -1 and +1:
+ * - +1.0 = All passive depth is on bid side (strong support below)
+ * - -1.0 = All passive depth is on ask side (strong resistance above)
+ * - 0.0 = Balanced passive liquidity
+ *
+ * Trading signals:
+ * - Positive book_imbalance = More passive buyers waiting → support
+ * - Negative book_imbalance = More passive sellers waiting → resistance
+ *
+ * Combined with VD:
+ * - VD positive + book_imbalance positive = Strong bullish (aggressive buying into support)
+ * - VD negative + book_imbalance negative = Strong bearish (aggressive selling into resistance)
+ * - VD positive + book_imbalance negative = Potential exhaustion (buying into resistance)
+ * - VD negative + book_imbalance positive = Potential reversal (selling into support)
+ *
+ * @param sumBidDepth - Sum of bidSize across all trades in candle
+ * @param sumAskDepth - Sum of askSize across all trades in candle
+ * @returns Book imbalance bounded -1 to +1, or 0 if no depth data
+ */
+export function calculateBookImbalance(sumBidDepth: number, sumAskDepth: number): number {
+  const totalDepth = sumBidDepth + sumAskDepth;
+  if (totalDepth === 0) return 0;
+
+  return (sumBidDepth - sumAskDepth) / totalDepth;
+}
+
+// ============================================================================
+// VWAP (Volume-Weighted Average Price)
+// ============================================================================
+
+/**
+ * Calculate VWAP (Volume-Weighted Average Price)
+ *
+ * VWAP = Σ(price × volume) / Σ(volume)
+ *
+ * VWAP represents the "fair value" based on actual trading activity.
+ * Institutional traders use VWAP as an execution benchmark.
+ *
+ * Interpretation:
+ * - Close > VWAP = Price ended above fair value (bullish, buyers dominated)
+ * - Close < VWAP = Price ended below fair value (bearish, sellers dominated)
+ * - Close ≈ VWAP = Price accepted at fair value
+ *
+ * The distance between close and VWAP indicates conviction:
+ * - Large gap = strong directional conviction
+ * - Small gap = price oscillated around fair value
+ *
+ * @param sumPriceVolume - Sum of (price × size) for each trade
+ * @param totalVolume - Total volume
+ * @returns VWAP, or 0 if no volume
+ */
+export function calculateVwap(sumPriceVolume: number, totalVolume: number): number {
+  if (totalVolume === 0) return 0;
+  return sumPriceVolume / totalVolume;
+}
+
+// ============================================================================
+// Spread Analysis (Liquidity Measure)
+// ============================================================================
+
+/**
+ * Calculate average spread in basis points
+ *
+ * Spread BPS = ((sumSpread / tradeCount) / avgMidPrice) * 10000
+ *
+ * Normalizes spread to basis points for cross-instrument comparison.
+ * A 1-tick spread on ES (~$12.50 / ~$5000 = 2.5 bps) can be compared
+ * to a 1-tick spread on CL (~$0.01 / ~$70 = 1.4 bps).
+ *
+ * Interpretation:
+ * - Low spread (< 2 bps): High liquidity, tight market, high confidence
+ * - Medium spread (2-5 bps): Normal liquidity
+ * - High spread (> 5 bps): Low liquidity, uncertainty, or volatility
+ *
+ * Trading signals:
+ * - Widening spread = Increasing uncertainty, potential volatility
+ * - Narrowing spread = Increasing confidence, trend continuation likely
+ * - Spike in spread = Often precedes or accompanies major moves
+ *
+ * @param sumSpread - Sum of (askPrice - bidPrice) across all trades
+ * @param sumMidPrice - Sum of midPrice across all trades (for normalization)
+ * @param tradeCount - Number of trades
+ * @returns Average spread in basis points, or 0 if no trades
+ */
+export function calculateSpreadBps(
+  sumSpread: number,
+  sumMidPrice: number,
+  tradeCount: number
+): number {
+  if (tradeCount === 0 || sumMidPrice === 0) return 0;
+
+  const avgSpread = sumSpread / tradeCount;
+  const avgMidPrice = sumMidPrice / tradeCount;
+
+  // Convert to basis points (1 bp = 0.01%)
+  return (avgSpread / avgMidPrice) * 10000;
+}
+
+// ============================================================================
+// Price Metrics
+// ============================================================================
+
 /**
  * Calculate normalized price change as percentage
  *
@@ -192,6 +327,12 @@ export function calculatePricePct(priceOpen: number, priceClose: number): number
 }
 
 /**
+ * Minimum thresholds for meaningful divergence detection
+ */
+const DIVERGENCE_MIN_PRICE_PCT = 0.5; // At least 0.5 basis points price move (0.005%)
+const DIVERGENCE_MIN_VD_RATIO = 0.10; // At least 10% volume imbalance
+
+/**
  * Detect delta-price divergence (accumulation/distribution signal)
  *
  * Divergence occurs when price and volume delta move in opposite directions,
@@ -207,25 +348,34 @@ export function calculatePricePct(priceOpen: number, priceClose: number): number
  *
  * - No divergence (0): Price followed the aggressor direction (normal behavior)
  *
- * @param priceOpen - Opening price of the candle
- * @param priceClose - Closing price of the candle
- * @param volumeDelta - Volume delta (askVolume - bidVolume)
+ * IMPROVED: Now requires minimum thresholds to filter noise:
+ * - Price must move at least 0.5 basis points (0.005%)
+ * - VD ratio must be at least 10% imbalance
+ *
+ * @param pricePct - Normalized price change (basis points)
+ * @param vdRatio - VD ratio (-1 to +1)
  * @returns 1 for bullish, -1 for bearish, 0 for no divergence
  */
 export function calculateDivergence(
-  priceOpen: number,
-  priceClose: number,
-  volumeDelta: number
+  pricePct: number,
+  vdRatio: number
 ): -1 | 0 | 1 {
-  const priceDelta = priceClose - priceOpen;
+  // Require minimum thresholds to avoid noise
+  const absPricePct = Math.abs(pricePct);
+  const absVdRatio = Math.abs(vdRatio);
+
+  // Not enough movement or imbalance to be meaningful
+  if (absPricePct < DIVERGENCE_MIN_PRICE_PCT || absVdRatio < DIVERGENCE_MIN_VD_RATIO) {
+    return 0;
+  }
 
   // Bullish divergence: bearish VD (sellers aggressive) but price went up
   // This means sellers are being absorbed - accumulation zone
-  if (volumeDelta < 0 && priceDelta > 0) return 1;
+  if (vdRatio < 0 && pricePct > 0) return 1;
 
   // Bearish divergence: bullish VD (buyers aggressive) but price went down
   // This means buyers are being absorbed - distribution zone
-  if (volumeDelta > 0 && priceDelta < 0) return -1;
+  if (vdRatio > 0 && pricePct < 0) return -1;
 
   return 0;
 }
@@ -272,28 +422,120 @@ export function calculateEvr(pricePct: number, vdRatio: number): number | null {
 }
 
 /**
+ * Input data for order flow metric calculations
+ */
+export interface OrderFlowInput {
+  // OHLCV
+  open: number;
+  close: number;
+  volume: number;
+
+  // Aggressive order flow
+  askVolume: number;
+  bidVolume: number;
+
+  // Passive order flow (book depth at time of trades)
+  sumBidDepth: number;
+  sumAskDepth: number;
+
+  // Spread tracking
+  sumSpread: number;
+  sumMidPrice: number;
+
+  // VWAP tracking
+  sumPriceVolume: number;
+
+  // Trade count
+  tradeCount: number;
+}
+
+/**
+ * Calculate average trade size
+ *
+ * Average Trade Size = volume / trades
+ *
+ * Indicates the typical size of orders in this candle:
+ * - Higher than normal = Possible institutional activity or block trades
+ * - Lower than normal = Retail activity or order splitting
+ * - Sudden increase = Often precedes significant moves
+ *
+ * Note: Trade size alone is NOT a reliable indicator of institutional
+ * vs retail activity. Institutions often split large orders into
+ * smaller trades to minimize market impact.
+ *
+ * @param volume - Total volume
+ * @param tradeCount - Number of trades
+ * @returns Average trade size, or 0 if no trades
+ */
+export function calculateAvgTradeSize(volume: number, tradeCount: number): number {
+  if (tradeCount === 0) return 0;
+  return volume / tradeCount;
+}
+
+/**
  * Calculate all order flow metrics from candle data
  *
  * This is the main function to compute all metrics in one call.
  * It returns a complete OrderFlowMetrics object for database storage.
  *
- * @param open - Opening price
- * @param close - Closing price
- * @param askVolume - Volume traded at ask (aggressive buys)
- * @param bidVolume - Volume traded at bid (aggressive sells)
+ * Metrics calculated:
+ * - Aggressive flow: vd, vdRatio (market orders)
+ * - Passive flow: bookImbalance (limit orders waiting)
+ * - Price: pricePct, vwap
+ * - Liquidity: spreadBps
+ * - Activity: trades, avgTradeSize
+ * - Absorption: divergence, evr
+ *
+ * @param input - All candle data needed for metric calculation
  * @returns Complete OrderFlowMetrics object
  */
-export function calculateOrderFlowMetrics(
-  open: number,
-  close: number,
-  askVolume: number,
-  bidVolume: number
-): OrderFlowMetrics {
+export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetrics {
+  const {
+    open,
+    close,
+    volume,
+    askVolume,
+    bidVolume,
+    sumBidDepth,
+    sumAskDepth,
+    sumSpread,
+    sumMidPrice,
+    sumPriceVolume,
+    tradeCount,
+  } = input;
+
+  // Aggressive order flow
   const vd = calculateVd(askVolume, bidVolume);
   const vdRatio = calculateVdRatio(askVolume, bidVolume);
+
+  // Passive order flow
+  const bookImbalance = calculateBookImbalance(sumBidDepth, sumAskDepth);
+
+  // Price metrics
   const pricePct = calculatePricePct(open, close);
-  const divergence = calculateDivergence(open, close, vd);
+  const vwap = calculateVwap(sumPriceVolume, volume);
+
+  // Liquidity
+  const spreadBps = calculateSpreadBps(sumSpread, sumMidPrice, tradeCount);
+
+  // Activity metrics
+  const trades = tradeCount;
+  const avgTradeSize = calculateAvgTradeSize(volume, tradeCount);
+
+  // Absorption detection (using normalized values for better thresholding)
+  const divergence = calculateDivergence(pricePct, vdRatio);
   const evr = calculateEvr(pricePct, vdRatio);
 
-  return { vd, vdRatio, pricePct, divergence, evr };
+  return {
+    vd,
+    vdRatio,
+    bookImbalance,
+    pricePct,
+    vwap,
+    spreadBps,
+    trades,
+    avgTradeSize,
+    divergence,
+    evr,
+  };
 }

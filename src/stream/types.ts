@@ -30,18 +30,38 @@ export interface TbboRecord {
  * Internal state for an in-progress candle being aggregated
  */
 export interface CandleState {
+  // OHLCV
   open: number;
   high: number;
   low: number;
   close: number;
   /** Total volume */
   volume: number;
+
+  // Volume Delta tracking (aggressive order flow)
   /** Volume from trades at ask (side='A') = aggressive buying */
   askVolume: number;
   /** Volume from trades at bid (side='B') = aggressive selling */
   bidVolume: number;
   /** Volume from trades with unknown/undetermined side */
   unknownSideVolume: number;
+
+  // Book Imbalance tracking (passive order flow)
+  /** Sum of bidSize at each trade (for averaging passive bid depth) */
+  sumBidDepth: number;
+  /** Sum of askSize at each trade (for averaging passive ask depth) */
+  sumAskDepth: number;
+
+  // Spread tracking (liquidity measure)
+  /** Sum of (askPrice - bidPrice) at each trade (for average spread) */
+  sumSpread: number;
+  /** Sum of midPrice at each trade (for spread normalization) */
+  sumMidPrice: number;
+
+  // VWAP tracking
+  /** Sum of (price * size) for each trade (for VWAP calculation) */
+  sumPriceVolume: number;
+
   /** Most recent contract symbol (for tracking active contract) */
   symbol: string;
   /** Number of trades in this candle */
