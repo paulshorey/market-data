@@ -2,6 +2,8 @@
  * Type definitions for TBBO streaming and candle aggregation
  */
 
+import type { MetricsOHLC } from "../metrics/ohlc.js";
+
 /**
  * Raw TBBO (Trade with Best Bid/Offer) record from Databento
  */
@@ -30,7 +32,7 @@ export interface TbboRecord {
  * Internal state for an in-progress candle being aggregated
  */
 export interface CandleState {
-  // OHLCV
+  // OHLCV (price)
   open: number;
   high: number;
   low: number;
@@ -74,6 +76,30 @@ export interface CandleState {
   symbol: string;
   /** Number of trades in this candle */
   tradeCount: number;
+
+  // =========================================================================
+  // Metric OHLC Tracking
+  // =========================================================================
+
+  /**
+   * OHLC tracking for all calculated metrics.
+   * Updated after each trade to capture intra-minute dynamics.
+   * Undefined until first trade is processed and metrics calculated.
+   */
+  metricsOHLC?: MetricsOHLC;
+
+  /**
+   * Current CVD value for this candle (base CVD + accumulated VD).
+   * This is needed to calculate CVD OHLC as trades come in.
+   * Set from the aggregator's running CVD total.
+   */
+  currentCvd?: number;
+
+  /**
+   * VD strength for this candle (from momentum tracker).
+   * Set by the aggregator which has access to rolling history.
+   */
+  vdStrength?: number;
 }
 
 /**
@@ -114,4 +140,15 @@ export interface NormalizedTrade {
   askPrice: number;
   bidSize: number;
   askSize: number;
+}
+
+/**
+ * Context needed to calculate metrics during candle aggregation.
+ * Provided by the aggregator which tracks state across candles.
+ */
+export interface MetricCalculationContext {
+  /** Current CVD value before this candle's VD is added */
+  baseCvd: number;
+  /** VD strength from momentum tracker (default 1 if no history) */
+  vdStrength: number;
 }

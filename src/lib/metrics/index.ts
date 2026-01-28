@@ -40,3 +40,12 @@ export { calculateSmp } from "./composite.js";
 
 // Main calculation function
 export { calculateOrderFlowMetrics } from "./calculate-all.js";
+
+// OHLC tracking for metrics
+export type { MetricOHLC, MetricsOHLC } from "./ohlc.js";
+export {
+  initMetricOHLC,
+  updateMetricOHLC,
+  initAllMetricsOHLC,
+  updateAllMetricsOHLC,
+} from "./ohlc.js";

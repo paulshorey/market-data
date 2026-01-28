@@ -12,6 +12,7 @@ export type {
   CandleForDb,
   AggregatorStats,
   NormalizedTrade,
+  MetricCalculationContext,
 } from "./types.js";
 
 // Side detection (Lee-Ready algorithm)
@@ -37,4 +38,6 @@ export {
   createCandleFromTrade,
   updateCandleWithTrade,
   addTradeToCandle,
+  updateCandleMetricsOHLC,
+  addTradeAndUpdateMetrics,
 } from "./candle-aggregation.js";
