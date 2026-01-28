@@ -18,27 +18,35 @@
  */
 
 import { pool } from "../lib/db.js";
-import type { TbboRecord, CandleState, CandleForDb, AggregatorStats } from "./types.js";
+
+// Import types from trade library
+import type {
+  TbboRecord,
+  CandleState,
+  CandleForDb,
+  AggregatorStats,
+  NormalizedTrade,
+} from "../lib/trade/index.js";
+
+// Import trade processing utilities
 import {
   MAX_TRADE_AGE_MS,
   nsToMs,
   getMinuteBucket,
   extractTicker,
-  inferSideFromPrice,
-  calculateVd,
-  calculateOrderFlowMetrics,
-  getLargeTradeThreshold,
-} from "./utils.js";
+  determineTradeSide,
+  addTradeToCandle,
+} from "../lib/trade/index.js";
+
+// Import metrics calculations
+import { calculateVd, MomentumTracker, calculateOrderFlowMetrics } from "../lib/metrics/index.js";
 
 // Re-export TbboRecord for consumers that import from this file
-export type { TbboRecord } from "./types.js";
+export type { TbboRecord } from "../lib/trade/index.js";
 
 // ============================================================================
 // Main Aggregator Class
 // ============================================================================
-
-/** Number of candles to track for rolling momentum calculations */
-const MOMENTUM_WINDOW = 5;
 
 /**
  * Aggregates TBBO records into 1-minute candles with VD and CVD tracking
@@ -54,8 +62,8 @@ export class TbboAggregator {
   /** Cumulative Volume Delta per ticker - persists across minutes */
   private cvdByTicker: Map<string, number> = new Map();
 
-  /** Rolling VD history per ticker for momentum calculations (most recent last) */
-  private vdHistoryByTicker: Map<string, number[]> = new Map();
+  /** Momentum tracker for VD strength calculations */
+  private momentumTracker = new MomentumTracker();
 
   /** Whether initialize() has been called */
   private initialized = false;
@@ -144,9 +152,44 @@ export class TbboAggregator {
     const ticker = extractTicker(record.symbol);
     const minuteBucket = getMinuteBucket(record.timestamp);
     const key = `${ticker}|${minuteBucket}`;
-    const { isAsk, isBid } = this.determineSide(record);
 
-    this.updateCandle(key, ticker, record, isAsk, isBid);
+    // Determine trade side using Lee-Ready algorithm as fallback
+    const { isAsk, isBid } = determineTradeSide(
+      record.side,
+      record.price,
+      record.bidPrice,
+      record.askPrice
+    );
+
+    // Track unknown side trades (not inferred successfully)
+    if (!isAsk && !isBid) {
+      this.stats.unknownSideTrades++;
+      if (this.stats.unknownSideTrades <= 5 || this.stats.unknownSideTrades % 1000 === 0) {
+        console.log(
+          `📊 Unknown side trade #${this.stats.unknownSideTrades}: ` +
+            `${record.symbol} @ ${record.price} (bid: ${record.bidPrice}, ask: ${record.askPrice})`
+        );
+      }
+    }
+
+    // Create normalized trade for candle aggregation
+    const normalizedTrade: NormalizedTrade = {
+      ticker,
+      minuteBucket,
+      price: record.price,
+      size: record.size,
+      isAsk,
+      isBid,
+      symbol: record.symbol,
+      bidPrice: record.bidPrice,
+      askPrice: record.askPrice,
+      bidSize: record.bidSize,
+      askSize: record.askSize,
+    };
+
+    // Use shared candle aggregation logic
+    addTradeToCandle(this.candles, key, normalizedTrade);
+
     this.recordsProcessed++;
     this.maybeLogStatus();
 
@@ -228,118 +271,6 @@ export class TbboAggregator {
   }
 
   /**
-   * Determine trade side, using Lee-Ready algorithm as fallback
-   */
-  private determineSide(record: TbboRecord): { isAsk: boolean; isBid: boolean } {
-    let isAsk = record.side === "A";
-    let isBid = record.side === "B";
-
-    // If side unknown, try Lee-Ready algorithm
-    if (!isAsk && !isBid) {
-      const inferred = inferSideFromPrice(record.price, record.bidPrice, record.askPrice);
-      if (inferred) {
-        isAsk = inferred === "A";
-        isBid = inferred === "B";
-      } else {
-        this.stats.unknownSideTrades++;
-        if (this.stats.unknownSideTrades <= 5 || this.stats.unknownSideTrades % 1000 === 0) {
-          console.log(
-            `📊 Unknown side trade #${this.stats.unknownSideTrades}: ` +
-              `${record.symbol} @ ${record.price} (bid: ${record.bidPrice}, ask: ${record.askPrice})`
-          );
-        }
-      }
-    }
-
-    return { isAsk, isBid };
-  }
-
-  /**
-   * Update or create a candle with trade data
-   */
-  private updateCandle(key: string, ticker: string, record: TbboRecord, isAsk: boolean, isBid: boolean): void {
-    const existing = this.candles.get(key);
-
-    // Calculate spread and midpoint for this trade
-    const spread = record.askPrice > 0 && record.bidPrice > 0 
-      ? record.askPrice - record.bidPrice 
-      : 0;
-    const midPrice = record.askPrice > 0 && record.bidPrice > 0 
-      ? (record.askPrice + record.bidPrice) / 2 
-      : record.price;
-
-    // Check if this is a large trade
-    const largeTradeThreshold = getLargeTradeThreshold(ticker);
-    const isLargeTrade = record.size >= largeTradeThreshold;
-
-    if (existing) {
-      // OHLCV
-      existing.high = Math.max(existing.high, record.price);
-      existing.low = Math.min(existing.low, record.price);
-      existing.close = record.price;
-      existing.volume += record.size;
-      existing.symbol = record.symbol;
-      existing.tradeCount++;
-
-      // Aggressive order flow
-      if (isAsk) existing.askVolume += record.size;
-      else if (isBid) existing.bidVolume += record.size;
-      else existing.unknownSideVolume += record.size;
-
-      // Passive order flow (book depth)
-      existing.sumBidDepth += record.bidSize || 0;
-      existing.sumAskDepth += record.askSize || 0;
-
-      // Spread tracking
-      existing.sumSpread += spread;
-      existing.sumMidPrice += midPrice;
-
-      // VWAP tracking
-      existing.sumPriceVolume += record.price * record.size;
-
-      // Large trade detection
-      existing.maxTradeSize = Math.max(existing.maxTradeSize, record.size);
-      if (isLargeTrade) {
-        existing.largeTradeCount++;
-        existing.largeTradeVolume += record.size;
-      }
-    } else {
-      this.candles.set(key, {
-        // OHLCV
-        open: record.price,
-        high: record.price,
-        low: record.price,
-        close: record.price,
-        volume: record.size,
-
-        // Aggressive order flow
-        askVolume: isAsk ? record.size : 0,
-        bidVolume: isBid ? record.size : 0,
-        unknownSideVolume: !isAsk && !isBid ? record.size : 0,
-
-        // Passive order flow (book depth)
-        sumBidDepth: record.bidSize || 0,
-        sumAskDepth: record.askSize || 0,
-
-        // Spread tracking
-        sumSpread: spread,
-        sumMidPrice: midPrice,
-
-        // VWAP tracking
-        sumPriceVolume: record.price * record.size,
-
-        // Large trade detection
-        maxTradeSize: record.size,
-        largeTradeCount: isLargeTrade ? 1 : 0,
-        largeTradeVolume: isLargeTrade ? record.size : 0,
-
-        symbol: record.symbol,
-        tradeCount: 1,
-      });
-    }
-  }
-
-  /**
    * Log status periodically (every 30 seconds)
    */
   private maybeLogStatus(): void {
@@ -412,57 +343,10 @@ export class TbboAggregator {
       this.cvdByTicker.set(ticker, currentCvd + vd);
 
       // Update VD history for momentum calculations
-      this.updateVdHistory(ticker, vd);
+      this.momentumTracker.updateVdHistory(ticker, vd);
 
       this.candles.delete(key);
     }
-  }
-
-  /**
-   * Update rolling VD history for a ticker (keeps last MOMENTUM_WINDOW values)
-   */
-  private updateVdHistory(ticker: string, vd: number): void {
-    const history = this.vdHistoryByTicker.get(ticker) || [];
-    history.push(vd);
-
-    // Keep only the last MOMENTUM_WINDOW values
-    if (history.length > MOMENTUM_WINDOW) {
-      history.shift();
-    }
-
-    this.vdHistoryByTicker.set(ticker, history);
-  }
-
-  /**
-   * Get rolling VD metrics for momentum calculation
-   * @returns { vdSma: average VD, vdStrength: current VD relative to average }
-   */
-  getVdMomentum(ticker: string, currentVd: number): { vdSma: number; vdStrength: number } {
-    const history = this.vdHistoryByTicker.get(ticker) || [];
-
-    if (history.length === 0) {
-      // No history yet, return neutral values
-      return { vdSma: currentVd, vdStrength: 1 };
-    }
-
-    // Calculate simple moving average of recent VD
-    const vdSma = history.reduce((sum, v) => sum + v, 0) / history.length;
-
-    // Calculate strength: how current VD compares to recent average
-    // Use absolute values to compare magnitude, then apply sign
-    const avgAbsVd = history.reduce((sum, v) => sum + Math.abs(v), 0) / history.length;
-
-    if (avgAbsVd === 0) {
-      // No recent activity, current VD is the signal
-      return { vdSma: 0, vdStrength: currentVd !== 0 ? 2 : 1 };
-    }
-
-    // vdStrength > 1 means current pressure is stronger than recent average
-    // vdStrength < 1 means current pressure is weaker than recent average
-    // Sign indicates if it's in same direction as recent trend
-    const vdStrength = Math.abs(currentVd) / avgAbsVd;
-
-    return { vdSma, vdStrength };
   }
 
   // =========================================================================
@@ -546,9 +430,9 @@ export class TbboAggregator {
     candles.forEach(({ ticker, time, candle }, i) => {
       // Calculate VD first to get momentum
       const currentVd = calculateVd(candle.askVolume, candle.bidVolume);
-      const { vdStrength } = this.getVdMomentum(ticker, currentVd);
+      const { vdStrength } = this.momentumTracker.getVdMomentum(ticker, currentVd);
 
-      // Calculate all order flow metrics
+      // Calculate all order flow metrics using the library
       const metrics = calculateOrderFlowMetrics({
         open: candle.open,
         close: candle.close,
