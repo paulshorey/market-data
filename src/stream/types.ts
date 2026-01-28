@@ -11,4 +11,5 @@ export type {
   CandleForDb,
   AggregatorStats,
   NormalizedTrade,
+  MetricCalculationContext,
 } from "../lib/trade/types.js";

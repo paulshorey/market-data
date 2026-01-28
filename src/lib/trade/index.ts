@@ -41,3 +41,14 @@ export {
   updateCandleMetricsOHLC,
   addTradeAndUpdateMetrics,
 } from "./candle-aggregation.js";
+
+// Database writer utilities
+export type { CvdContext } from "./db-writer.js";
+export {
+  COLUMNS_PER_ROW,
+  buildPlaceholder,
+  buildCandleInsertQuery,
+  buildCandleInsertParams,
+  buildFallbackRowValues,
+  buildOhlcRowValues,
+} from "./db-writer.js";
