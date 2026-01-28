@@ -12,9 +12,13 @@ CREATE TABLE "candles-1m" (
     close DOUBLE PRECISION NOT NULL,
     volume DOUBLE PRECISION NOT NULL,
     symbol TEXT,
-    vd DOUBLE PRECISION,              -- Volume Delta (askVolume - bidVolume)
-    cvd DOUBLE PRECISION,             -- Cumulative Volume Delta
-    momentum DOUBLE PRECISION,        -- Price efficiency: (close - open) / |vd|
+    -- Order Flow Metrics
+    vd DOUBLE PRECISION,              -- Volume Delta: askVolume - bidVolume
+    cvd DOUBLE PRECISION,             -- Cumulative Volume Delta (running total)
+    vd_ratio DOUBLE PRECISION,        -- VD / total volume, bounded -1 to +1
+    price_pct DOUBLE PRECISION,       -- Price change in basis points (100 = 1%)
+    divergence SMALLINT,              -- 1=bullish, -1=bearish, 0=none
+    evr DOUBLE PRECISION,             -- Effort vs Result absorption score
     PRIMARY KEY (ticker, time)
 );
 
@@ -32,13 +36,19 @@ SELECT add_compression_policy('candles-1m', INTERVAL '1 month');
 
 ### Migration: Adding Order Flow Columns
 
-For existing deployments, add the vd/cvd/momentum columns with the following statements:
+For existing deployments, add the order flow columns with the following statements:
 
 ```sql
 -- Add order flow columns to existing candles-1m table
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd DOUBLE PRECISION;
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd DOUBLE PRECISION;
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS momentum DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd_ratio DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS price_pct DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS divergence SMALLINT;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS evr DOUBLE PRECISION;
+
+-- If migrating from old schema with momentum column, drop it
+ALTER TABLE "candles-1m" DROP COLUMN IF EXISTS momentum;
 ```
 
 **Note on compressed chunks:** If you have compressed chunks, you may need to decompress them before adding columns, then recompress:

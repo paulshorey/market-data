@@ -20,7 +20,7 @@ import "dotenv/config";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
-import { extractTicker, inferSideFromPrice, calculateVd, calculateMomentum } from "../src/stream/utils.js";
+import { extractTicker, inferSideFromPrice, calculateOrderFlowMetrics } from "../src/stream/utils.js";
 import type { CandleState, CandleForDb } from "../src/stream/types.js";
 
 // ============================================================================
@@ -309,20 +309,24 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
   const placeholders: string[] = [];
 
   batch.forEach(({ ticker, time, candle }, i) => {
-    const vd = calculateVd(candle.askVolume, candle.bidVolume);
+    // Calculate all order flow metrics
+    const metrics = calculateOrderFlowMetrics(
+      candle.open,
+      candle.close,
+      candle.askVolume,
+      candle.bidVolume
+    );
 
     // Use running total if available (from previous batches), otherwise use stored CVD
     const baseCvd = runningCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
-    const cvd = baseCvd + vd;
+    const cvd = baseCvd + metrics.vd;
     runningCvd.set(ticker, cvd);
 
-    // Calculate momentum: price efficiency relative to volume delta
-    const momentum = calculateMomentum(candle.open, candle.close, vd);
-
-    const offset = i * 11;
+    const offset = i * 14;
     placeholders.push(
       `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
+        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
+        `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`
     );
     values.push(
       time,
@@ -333,14 +337,17 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       candle.low,
       candle.close,
       candle.volume,
-      vd,
+      metrics.vd,
       cvd,
-      momentum
+      metrics.vdRatio,
+      metrics.pricePct,
+      metrics.divergence,
+      metrics.evr
     );
   });
 
   const query = `
-    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, momentum)
+    INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, vd_ratio, price_pct, divergence, evr)
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
       symbol = EXCLUDED.symbol,
@@ -351,7 +358,10 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       volume = EXCLUDED.volume,
       vd = EXCLUDED.vd,
       cvd = EXCLUDED.cvd,
-      momentum = EXCLUDED.momentum
+      vd_ratio = EXCLUDED.vd_ratio,
+      price_pct = EXCLUDED.price_pct,
+      divergence = EXCLUDED.divergence,
+      evr = EXCLUDED.evr
     WHERE EXCLUDED.volume >= "candles-1m".volume
   `;
 

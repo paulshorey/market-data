@@ -121,46 +121,179 @@ export function calculateVd(askVolume: number, bidVolume: number): number {
 }
 
 // ============================================================================
-// Momentum / Absorption Utilities
+// Order Flow Metrics
 // ============================================================================
 
 /**
- * Calculate Momentum from price change and volume delta
+ * Order flow metrics calculated from TBBO data
+ */
+export interface OrderFlowMetrics {
+  /** Volume Delta: askVolume - bidVolume */
+  vd: number;
+  /** VD Ratio: VD / classified volume, bounded -1 to +1 */
+  vdRatio: number;
+  /** Price change as percentage (basis points, 100 = 1%) */
+  pricePct: number;
+  /** Divergence flag: 1=bullish (accumulation), -1=bearish (distribution), 0=none */
+  divergence: -1 | 0 | 1;
+  /** Effort vs Result: absorption score. null = no meaningful imbalance, 0 = strong absorption */
+  evr: number | null;
+}
+
+/**
+ * Calculate VD Ratio (Delta Ratio)
  *
- * Momentum = price_delta / |volume_delta|
+ * VD Ratio = VD / totalClassifiedVolume
  *
- * Measures price efficiency relative to aggressive volume activity:
- * - Positive momentum: Price moved up (bullish)
- * - Negative momentum: Price moved down (bearish)
- * - High magnitude: Efficient price movement per unit of aggressive activity
- * - Low magnitude (near zero) with high VD: Absorption - price didn't follow
- *   aggressive activity, indicating accumulation/distribution zones
+ * Normalized metric bounded between -1 and +1:
+ * - +1 = 100% buy dominance (all volume at ask)
+ * - -1 = 100% sell dominance (all volume at bid)
+ * - 0 = balanced buying and selling
  *
- * Use cases:
- * - Detect absorption: High |VD| but low |momentum| = orders being absorbed
- * - Detect divergence: Price moving opposite to VD direction
- * - Identify accumulation: Bearish VD but no price drop (sellers being absorbed)
- * - Identify distribution: Bullish VD but no price rise (buyers being absorbed)
+ * This is the most important normalized metric for evaluating imbalance intensity.
+ * Professional traders use this to distinguish between significant imbalances
+ * (e.g., 65% delta) and noise-level readings (e.g., 8% delta).
+ *
+ * NOTE: Uses only classified volume (ask + bid), excluding unknown side trades.
+ * This gives a more accurate picture of the known aggressor imbalance.
+ * The unknownSideVolume is tracked separately in the candle but not included here.
+ *
+ * @param askVolume - Volume traded at the ask (aggressive buys)
+ * @param bidVolume - Volume traded at the bid (aggressive sells)
+ * @returns VD ratio bounded -1 to +1, or 0 if no classified volume
+ */
+export function calculateVdRatio(askVolume: number, bidVolume: number): number {
+  const classifiedVolume = askVolume + bidVolume;
+  if (classifiedVolume === 0) return 0;
+
+  const vd = askVolume - bidVolume;
+  return vd / classifiedVolume;
+}
+
+/**
+ * Calculate normalized price change as percentage
+ *
+ * Price Pct = ((close - open) / open) * 10000
+ *
+ * Returns price change in basis points (1 bp = 0.01%):
+ * - 100 = 1% price increase
+ * - -50 = 0.5% price decrease
+ *
+ * Using basis points provides cross-instrument comparability:
+ * ES at 5000 and CL at 70 can be directly compared.
+ *
+ * @param priceOpen - Opening price of the candle
+ * @param priceClose - Closing price of the candle
+ * @returns Price change in basis points, or 0 if open is 0
+ */
+export function calculatePricePct(priceOpen: number, priceClose: number): number {
+  if (priceOpen === 0) return 0;
+  return ((priceClose - priceOpen) / priceOpen) * 10000;
+}
+
+/**
+ * Detect delta-price divergence (accumulation/distribution signal)
+ *
+ * Divergence occurs when price and volume delta move in opposite directions,
+ * indicating that aggressive orders are being absorbed by passive limit orders.
+ *
+ * - Bullish divergence (+1): Sellers aggressive (VD < 0) but price went UP
+ *   → Passive buyers absorbing sell orders (ACCUMULATION)
+ *   → Large traders building long positions without pushing price down
+ *
+ * - Bearish divergence (-1): Buyers aggressive (VD > 0) but price went DOWN
+ *   → Passive sellers absorbing buy orders (DISTRIBUTION)
+ *   → Large traders distributing positions despite buying pressure
+ *
+ * - No divergence (0): Price followed the aggressor direction (normal behavior)
  *
  * @param priceOpen - Opening price of the candle
  * @param priceClose - Closing price of the candle
  * @param volumeDelta - Volume delta (askVolume - bidVolume)
- * @returns Momentum value, or null if volume delta is zero (mathematically undefined)
+ * @returns 1 for bullish, -1 for bearish, 0 for no divergence
  */
-export function calculateMomentum(
+export function calculateDivergence(
   priceOpen: number,
   priceClose: number,
   volumeDelta: number
-): number | null {
-  // No aggressor activity = momentum is mathematically undefined
-  // Return null to distinguish from "zero momentum" (price didn't move)
-  if (volumeDelta === 0) {
-    return null;
-  }
-
+): -1 | 0 | 1 {
   const priceDelta = priceClose - priceOpen;
 
-  // Use absolute value of VD so momentum sign reflects price direction
-  // This allows detecting divergence when VD and price move opposite directions
-  return priceDelta / Math.abs(volumeDelta);
+  // Bullish divergence: bearish VD (sellers aggressive) but price went up
+  // This means sellers are being absorbed - accumulation zone
+  if (volumeDelta < 0 && priceDelta > 0) return 1;
+
+  // Bearish divergence: bullish VD (buyers aggressive) but price went down
+  // This means buyers are being absorbed - distribution zone
+  if (volumeDelta > 0 && priceDelta < 0) return -1;
+
+  return 0;
+}
+
+/**
+ * Calculate Effort vs Result (EVR) absorption score
+ *
+ * EVR measures the efficiency of aggressive volume in moving price.
+ * When effort (aggressive volume) doesn't produce result (price movement),
+ * it indicates absorption - large limit orders absorbing market orders.
+ *
+ * Formula: EVR = pricePct / (|vdRatio| * 100)
+ *
+ * Interpretation:
+ * - |EVR| > 1.0: Very efficient - price moved more than expected for the imbalance
+ * - |EVR| 0.5-1.0: Normal efficiency - price followed imbalance proportionally
+ * - |EVR| < 0.5: Low efficiency - possible absorption
+ * - |EVR| ≈ 0 with high |vdRatio|: Strong absorption signal
+ * - EVR = null: No meaningful imbalance to measure (vdRatio < 5%)
+ *
+ * EVR sign indicates price direction (positive = up, negative = down).
+ * Compare with vdRatio sign to detect divergence:
+ * - Same sign: Price followed aggressor (normal)
+ * - Opposite sign: Price moved against aggressor (absorption/divergence)
+ *
+ * Combined analysis:
+ * - Low |EVR| + divergence flag: Strong absorption (accumulation/distribution)
+ * - Low |EVR| + no divergence: Price stalled (consolidation, range-bound)
+ * - High |EVR| + no divergence: Clean trend move
+ *
+ * @param pricePct - Normalized price change (basis points)
+ * @param vdRatio - VD ratio (-1 to +1)
+ * @returns EVR score, or null if vdRatio < 5% (no meaningful imbalance)
+ */
+export function calculateEvr(pricePct: number, vdRatio: number): number | null {
+  // If VD ratio is very small (< 5% imbalance), EVR is not meaningful
+  // Return null to distinguish from "EVR = 0" which means absorption
+  const absVdRatio = Math.abs(vdRatio);
+  if (absVdRatio < 0.05) return null;
+
+  // Scale vdRatio to percentage (0-100) for more intuitive EVR values
+  // A 50% VD ratio with 10bp price move = EVR of 0.2
+  return pricePct / (absVdRatio * 100);
+}
+
+/**
+ * Calculate all order flow metrics from candle data
+ *
+ * This is the main function to compute all metrics in one call.
+ * It returns a complete OrderFlowMetrics object for database storage.
+ *
+ * @param open - Opening price
+ * @param close - Closing price
+ * @param askVolume - Volume traded at ask (aggressive buys)
+ * @param bidVolume - Volume traded at bid (aggressive sells)
+ * @returns Complete OrderFlowMetrics object
+ */
+export function calculateOrderFlowMetrics(
+  open: number,
+  close: number,
+  askVolume: number,
+  bidVolume: number
+): OrderFlowMetrics {
+  const vd = calculateVd(askVolume, bidVolume);
+  const vdRatio = calculateVdRatio(askVolume, bidVolume);
+  const pricePct = calculatePricePct(open, close);
+  const divergence = calculateDivergence(open, close, vd);
+  const evr = calculateEvr(pricePct, vdRatio);
+
+  return { vd, vdRatio, pricePct, divergence, evr };
 }

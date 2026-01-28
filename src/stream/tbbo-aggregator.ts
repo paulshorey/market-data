@@ -7,9 +7,11 @@
  * Features:
  * - Volume Delta (VD): per-candle (askVolume - bidVolume)
  * - Cumulative Volume Delta (CVD): running total of VD across candles
- * - Momentum: price efficiency metric (close - open) / |VD|
- *   - High momentum = efficient price movement
- *   - Low momentum = absorption (price didn't follow aggressive volume)
+ * - Order Flow Metrics:
+ *   - VD Ratio: Normalized delta (-1 to +1) for cross-instrument comparison
+ *   - Price Pct: Normalized price change in basis points
+ *   - Divergence: Flag for accumulation/distribution detection
+ *   - EVR: Effort vs Result absorption score
  * - Lee-Ready algorithm fallback for unknown trade sides
  * - Late trade rejection to prevent data corruption
  * - Graceful handling of DB write failures
@@ -24,7 +26,7 @@ import {
   extractTicker,
   inferSideFromPrice,
   calculateVd,
-  calculateMomentum,
+  calculateOrderFlowMetrics,
 } from "./utils.js";
 
 // Re-export TbboRecord for consumers that import from this file
@@ -372,7 +374,7 @@ export class TbboAggregator {
       const { values, placeholders } = this.buildInsertParams(sorted);
 
       const query = `
-        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, momentum)
+        INSERT INTO "candles-1m" (time, ticker, symbol, open, high, low, close, volume, vd, cvd, vd_ratio, price_pct, divergence, evr)
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -383,7 +385,10 @@ export class TbboAggregator {
           volume = EXCLUDED.volume,
           vd = EXCLUDED.vd,
           cvd = EXCLUDED.cvd,
-          momentum = EXCLUDED.momentum
+          vd_ratio = EXCLUDED.vd_ratio,
+          price_pct = EXCLUDED.price_pct,
+          divergence = EXCLUDED.divergence,
+          evr = EXCLUDED.evr
         WHERE EXCLUDED.volume >= "candles-1m".volume
       `;
 
@@ -397,7 +402,7 @@ export class TbboAggregator {
   }
 
   /**
-   * Build parameterized INSERT values with VD, CVD, and momentum calculation
+   * Build parameterized INSERT values with all order flow metrics
    */
   private buildInsertParams(candles: CandleForDb[]): {
     values: (string | number | null)[];
@@ -410,23 +415,24 @@ export class TbboAggregator {
     const batchCvd: Map<string, number> = new Map();
 
     candles.forEach(({ ticker, time, candle }, i) => {
-      // Calculate Volume Delta (VD)
-      const vd = calculateVd(candle.askVolume, candle.bidVolume);
+      // Calculate all order flow metrics
+      const metrics = calculateOrderFlowMetrics(
+        candle.open,
+        candle.close,
+        candle.askVolume,
+        candle.bidVolume
+      );
 
       // Use batch running total if available, otherwise use stored CVD
       const baseCvd = batchCvd.get(ticker) ?? (this.cvdByTicker.get(ticker) || 0);
-      const cvd = baseCvd + vd;
+      const cvd = baseCvd + metrics.vd;
       batchCvd.set(ticker, cvd);
 
-      // Calculate momentum: price efficiency relative to volume delta
-      // High momentum = price moved efficiently with aggressor activity
-      // Low momentum = absorption (price didn't follow despite volume)
-      const momentum = calculateMomentum(candle.open, candle.close, vd);
-
-      const offset = i * 11;
+      const offset = i * 14;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`
+          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
+          `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`
       );
       values.push(
         time,
@@ -437,9 +443,12 @@ export class TbboAggregator {
         candle.low,
         candle.close,
         candle.volume,
-        vd,
+        metrics.vd,
         cvd,
-        momentum
+        metrics.vdRatio,
+        metrics.pricePct,
+        metrics.divergence,
+        metrics.evr
       );
     });
 

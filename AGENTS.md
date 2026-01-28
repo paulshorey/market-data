@@ -14,7 +14,7 @@ Documentation about Railway is available locally in this codebase, inside the "d
 
 - `GET /health` - Health check for Railway
 - `GET /tables` - Database schema information
-- `GET /historical/candles?start=<ms>&end=<ms>&ticker=<required>` - OHLCV candle data (returns `[timestamp_ms, open, high, low, close, volume]` tuples for Highcharts compatibility; order flow metrics vd/cvd/momentum not included)
+- `GET /historical/candles?start=<ms>&end=<ms>&ticker=<required>` - OHLCV candle data (returns `[timestamp_ms, open, high, low, close, volume]` tuples for Highcharts compatibility; order flow metrics not included in basic response)
 - `GET /historical/range` - Available date range in database
 
 ## Database Tables
@@ -27,11 +27,13 @@ TimescaleDB with candle tables per timeframe:
 
 Base columns (all timeframes): time (ISO), ticker, symbol, open, high, low, close, volume
 
-Additional columns on `candles-1m` only: vd, cvd, momentum
+Additional order flow columns on `candles-1m` only: vd, cvd, vd_ratio, price_pct, divergence, evr
 
 ## Order Flow Metrics
 
-Order flow analysis from TBBO (Trade by Best Bid/Offer) data:
+Order flow analysis from TBBO (Trade by Best Bid/Offer) data. These metrics help detect accumulation, distribution, and absorption zones where large traders are building or exiting positions.
+
+### Core Metrics
 
 - **VD (Volume Delta)**: `askVolume - bidVolume` per candle
   - Positive = more aggressive buying (bullish pressure)
@@ -41,12 +43,31 @@ Order flow analysis from TBBO (Trade by Best Bid/Offer) data:
   - Tracks cumulative aggressor activity over time
   - Divergence from price indicates potential reversal
 
-- **Momentum**: `(close - open) / |vd|` (price efficiency)
-  - Measures how much price moved per unit of aggressive volume
-  - High magnitude = efficient price movement
-  - Low magnitude with high |VD| = **absorption** (accumulation/distribution)
-  - Used to detect areas where aggressive orders are being absorbed by limit orders
-  - When `VD = 0` (no aggressor imbalance), momentum is stored as `NULL` (mathematically undefined)
+### Normalized Metrics (for cross-instrument comparison)
+
+- **VD Ratio**: `VD / (askVolume + bidVolume)` bounded -1 to +1
+  - +1 = 100% buy dominance (all volume at ask)
+  - -1 = 100% sell dominance (all volume at bid)
+  - 0 = balanced buying and selling
+  - Most important metric for evaluating imbalance intensity
+
+- **Price Pct**: `((close - open) / open) * 10000` in basis points
+  - 100 = 1% price increase
+  - Allows cross-instrument comparison (ES at 5000 vs CL at 70)
+
+### Absorption Detection
+
+- **Divergence**: Flag for accumulation/distribution signals
+  - `+1` = Bullish divergence: Sellers aggressive (VD < 0) but price UP → accumulation
+  - `-1` = Bearish divergence: Buyers aggressive (VD > 0) but price DOWN → distribution
+  - `0` = No divergence (price followed aggressor direction)
+
+- **EVR (Effort vs Result)**: `price_pct / (|vd_ratio| * 100)` absorption score
+  - `NULL` = No meaningful imbalance (vd_ratio < 5%), EVR not applicable
+  - High |EVR| (> 1): Efficient price movement per unit of imbalance
+  - Low |EVR| (< 0.5): **Absorption** - aggressive volume absorbed by limit orders
+  - EVR ≈ 0 with significant vd_ratio = Strong absorption signal
+  - Combined with divergence flag to detect accumulation/distribution zones
 
 ## Code Structure
 
