@@ -7,38 +7,51 @@
  * Features:
  * - Volume Delta (VD): per-candle (askVolume - bidVolume)
  * - Cumulative Volume Delta (CVD): running total of VD across candles
- * - Order Flow Metrics:
- *   - VD Ratio: Normalized delta (-1 to +1) for cross-instrument comparison
- *   - Price Pct: Normalized price change in basis points
- *   - Divergence: Flag for accumulation/distribution detection
- *   - EVR: Effort vs Result absorption score
+ * - Order Flow Metrics with OHLC tracking:
+ *   - Each metric tracks Open/High/Low/Close within the minute
+ *   - Open: First value (set once)
+ *   - High: Maximum value seen
+ *   - Low: Minimum value seen
+ *   - Close: Latest value (updated every second)
  * - Lee-Ready algorithm fallback for unknown trade sides
  * - Late trade rejection to prevent data corruption
  * - Graceful handling of DB write failures
  */
 
 import { pool } from "../lib/db.js";
-import type { TbboRecord, CandleState, CandleForDb, AggregatorStats } from "./types.js";
+
+// Import types from trade library
+import type {
+  TbboRecord,
+  CandleState,
+  CandleForDb,
+  AggregatorStats,
+  NormalizedTrade,
+  MetricCalculationContext,
+  CvdContext,
+} from "../lib/trade/index.js";
+
+// Import trade processing utilities
 import {
   MAX_TRADE_AGE_MS,
   nsToMs,
   getMinuteBucket,
   extractTicker,
-  inferSideFromPrice,
-  calculateVd,
-  calculateOrderFlowMetrics,
-  getLargeTradeThreshold,
-} from "./utils.js";
+  determineTradeSide,
+  addTradeAndUpdateMetrics,
+  buildCandleInsertQuery,
+  buildCandleInsertParams,
+} from "../lib/trade/index.js";
+
+// Import metrics calculations
+import { calculateVd, MomentumTracker } from "../lib/metrics/index.js";
 
 // Re-export TbboRecord for consumers that import from this file
-export type { TbboRecord } from "./types.js";
+export type { TbboRecord } from "../lib/trade/index.js";
 
 // ============================================================================
 // Main Aggregator Class
 // ============================================================================
-
-/** Number of candles to track for rolling momentum calculations */
-const MOMENTUM_WINDOW = 5;
 
 /**
  * Aggregates TBBO records into 1-minute candles with VD and CVD tracking
@@ -54,8 +67,8 @@ export class TbboAggregator {
   /** Cumulative Volume Delta per ticker - persists across minutes */
   private cvdByTicker: Map<string, number> = new Map();
 
-  /** Rolling VD history per ticker for momentum calculations (most recent last) */
-  private vdHistoryByTicker: Map<string, number[]> = new Map();
+  /** Momentum tracker for VD strength calculations */
+  private momentumTracker = new MomentumTracker();
 
   /** Whether initialize() has been called */
   private initialized = false;
@@ -93,9 +106,9 @@ export class TbboAggregator {
 
     try {
       const result = await pool.query(`
-        SELECT DISTINCT ON (ticker) ticker, cvd
+        SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
         FROM "candles-1m"
-        WHERE cvd IS NOT NULL
+        WHERE cvd_close IS NOT NULL
         ORDER BY ticker, time DESC
       `);
 
@@ -144,13 +157,67 @@ export class TbboAggregator {
     const ticker = extractTicker(record.symbol);
     const minuteBucket = getMinuteBucket(record.timestamp);
     const key = `${ticker}|${minuteBucket}`;
-    const { isAsk, isBid } = this.determineSide(record);
 
-    this.updateCandle(key, ticker, record, isAsk, isBid);
+    // Determine trade side using Lee-Ready algorithm as fallback
+    const { isAsk, isBid } = determineTradeSide(
+      record.side,
+      record.price,
+      record.bidPrice,
+      record.askPrice
+    );
+
+    // Track unknown side trades (not inferred successfully)
+    if (!isAsk && !isBid) {
+      this.stats.unknownSideTrades++;
+      if (this.stats.unknownSideTrades <= 5 || this.stats.unknownSideTrades % 1000 === 0) {
+        console.log(
+          `📊 Unknown side trade #${this.stats.unknownSideTrades}: ` +
+            `${record.symbol} @ ${record.price} (bid: ${record.bidPrice}, ask: ${record.askPrice})`
+        );
+      }
+    }
+
+    // Create normalized trade for candle aggregation
+    const normalizedTrade: NormalizedTrade = {
+      ticker,
+      minuteBucket,
+      price: record.price,
+      size: record.size,
+      isAsk,
+      isBid,
+      symbol: record.symbol,
+      bidPrice: record.bidPrice,
+      askPrice: record.askPrice,
+      bidSize: record.bidSize,
+      askSize: record.askSize,
+    };
+
+    // Get context for metric calculation
+    const baseCvd = this.cvdByTicker.get(ticker) || 0;
+    const currentVd = this.getCurrentVdForTicker(key);
+    const { vdStrength } = this.momentumTracker.getVdMomentum(ticker, currentVd);
+
+    const context: MetricCalculationContext = {
+      baseCvd,
+      vdStrength,
+    };
+
+    // Add trade and update metrics OHLC
+    addTradeAndUpdateMetrics(this.candles, key, normalizedTrade, context);
+
     this.recordsProcessed++;
     this.maybeLogStatus();
 
     return true;
+  }
+
+  /**
+   * Get current VD for a ticker's candle (for momentum calculation)
+   */
+  private getCurrentVdForTicker(key: string): number {
+    const candle = this.candles.get(key);
+    if (!candle) return 0;
+    return calculateVd(candle.askVolume, candle.bidVolume);
   }
 
   // =========================================================================
@@ -228,118 +295,6 @@ export class TbboAggregator {
   }
 
   /**
-   * Determine trade side, using Lee-Ready algorithm as fallback
-   */
-  private determineSide(record: TbboRecord): { isAsk: boolean; isBid: boolean } {
-    let isAsk = record.side === "A";
-    let isBid = record.side === "B";
-
-    // If side unknown, try Lee-Ready algorithm
-    if (!isAsk && !isBid) {
-      const inferred = inferSideFromPrice(record.price, record.bidPrice, record.askPrice);
-      if (inferred) {
-        isAsk = inferred === "A";
-        isBid = inferred === "B";
-      } else {
-        this.stats.unknownSideTrades++;
-        if (this.stats.unknownSideTrades <= 5 || this.stats.unknownSideTrades % 1000 === 0) {
-          console.log(
-            `📊 Unknown side trade #${this.stats.unknownSideTrades}: ` +
-              `${record.symbol} @ ${record.price} (bid: ${record.bidPrice}, ask: ${record.askPrice})`
-          );
-        }
-      }
-    }
-
-    return { isAsk, isBid };
-  }
-
-  /**
-   * Update or create a candle with trade data
-   */
-  private updateCandle(key: string, ticker: string, record: TbboRecord, isAsk: boolean, isBid: boolean): void {
-    const existing = this.candles.get(key);
-
-    // Calculate spread and midpoint for this trade
-    const spread = record.askPrice > 0 && record.bidPrice > 0 
-      ? record.askPrice - record.bidPrice 
-      : 0;
-    const midPrice = record.askPrice > 0 && record.bidPrice > 0 
-      ? (record.askPrice + record.bidPrice) / 2 
-      : record.price;
-
-    // Check if this is a large trade
-    const largeTradeThreshold = getLargeTradeThreshold(ticker);
-    const isLargeTrade = record.size >= largeTradeThreshold;
-
-    if (existing) {
-      // OHLCV
-      existing.high = Math.max(existing.high, record.price);
-      existing.low = Math.min(existing.low, record.price);
-      existing.close = record.price;
-      existing.volume += record.size;
-      existing.symbol = record.symbol;
-      existing.tradeCount++;
-
-      // Aggressive order flow
-      if (isAsk) existing.askVolume += record.size;
-      else if (isBid) existing.bidVolume += record.size;
-      else existing.unknownSideVolume += record.size;
-
-      // Passive order flow (book depth)
-      existing.sumBidDepth += record.bidSize || 0;
-      existing.sumAskDepth += record.askSize || 0;
-
-      // Spread tracking
-      existing.sumSpread += spread;
-      existing.sumMidPrice += midPrice;
-
-      // VWAP tracking
-      existing.sumPriceVolume += record.price * record.size;
-
-      // Large trade detection
-      existing.maxTradeSize = Math.max(existing.maxTradeSize, record.size);
-      if (isLargeTrade) {
-        existing.largeTradeCount++;
-        existing.largeTradeVolume += record.size;
-      }
-    } else {
-      this.candles.set(key, {
-        // OHLCV
-        open: record.price,
-        high: record.price,
-        low: record.price,
-        close: record.price,
-        volume: record.size,
-
-        // Aggressive order flow
-        askVolume: isAsk ? record.size : 0,
-        bidVolume: isBid ? record.size : 0,
-        unknownSideVolume: !isAsk && !isBid ? record.size : 0,
-
-        // Passive order flow (book depth)
-        sumBidDepth: record.bidSize || 0,
-        sumAskDepth: record.askSize || 0,
-
-        // Spread tracking
-        sumSpread: spread,
-        sumMidPrice: midPrice,
-
-        // VWAP tracking
-        sumPriceVolume: record.price * record.size,
-
-        // Large trade detection
-        maxTradeSize: record.size,
-        largeTradeCount: isLargeTrade ? 1 : 0,
-        largeTradeVolume: isLargeTrade ? record.size : 0,
-
-        symbol: record.symbol,
-        tradeCount: 1,
-      });
-    }
-  }
-
-  /**
    * Log status periodically (every 30 seconds)
    */
   private maybeLogStatus(): void {
@@ -412,57 +367,10 @@ export class TbboAggregator {
       this.cvdByTicker.set(ticker, currentCvd + vd);
 
       // Update VD history for momentum calculations
-      this.updateVdHistory(ticker, vd);
+      this.momentumTracker.updateVdHistory(ticker, vd);
 
       this.candles.delete(key);
     }
-  }
-
-  /**
-   * Update rolling VD history for a ticker (keeps last MOMENTUM_WINDOW values)
-   */
-  private updateVdHistory(ticker: string, vd: number): void {
-    const history = this.vdHistoryByTicker.get(ticker) || [];
-    history.push(vd);
-
-    // Keep only the last MOMENTUM_WINDOW values
-    if (history.length > MOMENTUM_WINDOW) {
-      history.shift();
-    }
-
-    this.vdHistoryByTicker.set(ticker, history);
-  }
-
-  /**
-   * Get rolling VD metrics for momentum calculation
-   * @returns { vdSma: average VD, vdStrength: current VD relative to average }
-   */
-  getVdMomentum(ticker: string, currentVd: number): { vdSma: number; vdStrength: number } {
-    const history = this.vdHistoryByTicker.get(ticker) || [];
-
-    if (history.length === 0) {
-      // No history yet, return neutral values
-      return { vdSma: currentVd, vdStrength: 1 };
-    }
-
-    // Calculate simple moving average of recent VD
-    const vdSma = history.reduce((sum, v) => sum + v, 0) / history.length;
-
-    // Calculate strength: how current VD compares to recent average
-    // Use absolute values to compare magnitude, then apply sign
-    const avgAbsVd = history.reduce((sum, v) => sum + Math.abs(v), 0) / history.length;
-
-    if (avgAbsVd === 0) {
-      // No recent activity, current VD is the signal
-      return { vdSma: 0, vdStrength: currentVd !== 0 ? 2 : 1 };
-    }
-
-    // vdStrength > 1 means current pressure is stronger than recent average
-    // vdStrength < 1 means current pressure is weaker than recent average
-    // Sign indicates if it's in same direction as recent trend
-    const vdStrength = Math.abs(currentVd) / avgAbsVd;
-
-    return { vdSma, vdStrength };
   }
 
   // =========================================================================
@@ -470,7 +378,7 @@ export class TbboAggregator {
   // =========================================================================
 
   /**
-   * Write candles to database using batch upsert
+   * Write candles to database using batch upsert with OHLC for all metrics
    * @returns true if successful, false if failed
    */
   private async writeCandlesToDb(candles: CandleForDb[]): Promise<boolean> {
@@ -483,43 +391,14 @@ export class TbboAggregator {
         return a.time.localeCompare(b.time);
       });
 
-      const { values, placeholders } = this.buildInsertParams(sorted);
+      // Create CVD context that uses our cvdByTicker map
+      const cvdContext: CvdContext = {
+        getBaseCvd: (ticker: string) => this.cvdByTicker.get(ticker) || 0,
+        // Don't update CVD here - it's updated in finalizeCompletedCandles
+      };
 
-      const query = `
-        INSERT INTO "candles-1m" (
-          time, ticker, symbol, open, high, low, close, volume,
-          vd, cvd, vd_ratio, book_imbalance,
-          price_pct, vwap, spread_bps,
-          trades, avg_trade_size,
-          max_trade_size, big_trades, big_volume,
-          divergence, evr, smp, vd_strength
-        )
-        VALUES ${placeholders.join(", ")}
-        ON CONFLICT (ticker, time) DO UPDATE SET
-          symbol = EXCLUDED.symbol,
-          open = "candles-1m".open,
-          high = GREATEST("candles-1m".high, EXCLUDED.high),
-          low = LEAST("candles-1m".low, EXCLUDED.low),
-          close = EXCLUDED.close,
-          volume = EXCLUDED.volume,
-          vd = EXCLUDED.vd,
-          cvd = EXCLUDED.cvd,
-          vd_ratio = EXCLUDED.vd_ratio,
-          book_imbalance = EXCLUDED.book_imbalance,
-          price_pct = EXCLUDED.price_pct,
-          vwap = EXCLUDED.vwap,
-          spread_bps = EXCLUDED.spread_bps,
-          trades = EXCLUDED.trades,
-          avg_trade_size = EXCLUDED.avg_trade_size,
-          max_trade_size = GREATEST("candles-1m".max_trade_size, EXCLUDED.max_trade_size),
-          big_trades = EXCLUDED.big_trades,
-          big_volume = EXCLUDED.big_volume,
-          divergence = EXCLUDED.divergence,
-          evr = EXCLUDED.evr,
-          smp = EXCLUDED.smp,
-          vd_strength = EXCLUDED.vd_strength
-        WHERE EXCLUDED.volume >= "candles-1m".volume
-      `;
+      const { values, placeholders } = buildCandleInsertParams(sorted, cvdContext);
+      const query = buildCandleInsertQuery(placeholders);
 
       await pool.query(query, values);
       this.candlesWritten += candles.length;
@@ -528,87 +407,5 @@ export class TbboAggregator {
       console.error("❌ Failed to write candles:", err);
       return false;
     }
-  }
-
-  /**
-   * Build parameterized INSERT values with all order flow metrics
-   */
-  private buildInsertParams(candles: CandleForDb[]): {
-    values: (string | number | null)[];
-    placeholders: string[];
-  } {
-    const values: (string | number | null)[] = [];
-    const placeholders: string[] = [];
-
-    // Track running CVD per ticker within this batch
-    const batchCvd: Map<string, number> = new Map();
-
-    candles.forEach(({ ticker, time, candle }, i) => {
-      // Calculate VD first to get momentum
-      const currentVd = calculateVd(candle.askVolume, candle.bidVolume);
-      const { vdStrength } = this.getVdMomentum(ticker, currentVd);
-
-      // Calculate all order flow metrics
-      const metrics = calculateOrderFlowMetrics({
-        open: candle.open,
-        close: candle.close,
-        volume: candle.volume,
-        askVolume: candle.askVolume,
-        bidVolume: candle.bidVolume,
-        sumBidDepth: candle.sumBidDepth,
-        sumAskDepth: candle.sumAskDepth,
-        sumSpread: candle.sumSpread,
-        sumMidPrice: candle.sumMidPrice,
-        sumPriceVolume: candle.sumPriceVolume,
-        vdStrength,
-        tradeCount: candle.tradeCount,
-        maxTradeSize: candle.maxTradeSize,
-        largeTradeCount: candle.largeTradeCount,
-        largeTradeVolume: candle.largeTradeVolume,
-      });
-
-      // Use batch running total if available, otherwise use stored CVD
-      const baseCvd = batchCvd.get(ticker) ?? (this.cvdByTicker.get(ticker) || 0);
-      const cvd = baseCvd + metrics.vd;
-      batchCvd.set(ticker, cvd);
-
-      // 24 columns total
-      const offset = i * 24;
-      placeholders.push(
-        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-          `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
-          `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
-          `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
-          `$${offset + 21}, $${offset + 22}, $${offset + 23}, $${offset + 24})`
-      );
-      values.push(
-        time,
-        ticker,
-        candle.symbol,
-        candle.open,
-        candle.high,
-        candle.low,
-        candle.close,
-        candle.volume,
-        metrics.vd,
-        cvd,
-        metrics.vdRatio,
-        metrics.bookImbalance,
-        metrics.pricePct,
-        metrics.vwap,
-        metrics.spreadBps,
-        metrics.trades,
-        metrics.avgTradeSize,
-        metrics.maxTradeSize,
-        metrics.bigTrades,
-        metrics.bigVolume,
-        metrics.divergence,
-        metrics.evr,
-        metrics.smp,
-        metrics.vdStrength
-      );
-    });
-
-    return { values, placeholders };
   }
 }

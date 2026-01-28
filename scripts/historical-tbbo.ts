@@ -12,6 +12,7 @@
  * Features:
  * - Processes JSONL files (one JSON object per line)
  * - Calculates Volume Delta (VD) and Cumulative Volume Delta (CVD)
+ * - Calculates all order flow metrics with OHLC tracking
  * - Resumable: loads last CVD from database on startup
  * - Batch writes for performance
  */
@@ -20,8 +21,25 @@ import "dotenv/config";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
-import { extractTicker, inferSideFromPrice, calculateOrderFlowMetrics, getLargeTradeThreshold } from "../src/stream/utils.js";
-import type { CandleState, CandleForDb } from "../src/stream/types.js";
+
+// Import types from trade library
+import type {
+  CandleState,
+  CandleForDb,
+  NormalizedTrade,
+  MetricCalculationContext,
+  CvdContext,
+} from "../src/lib/trade/index.js";
+
+// Import trade processing utilities
+import {
+  extractTicker,
+  toMinuteBucket,
+  determineTradeSide,
+  addTradeAndUpdateMetrics,
+  buildCandleInsertQuery,
+  buildCandleInsertParams,
+} from "../src/lib/trade/index.js";
 
 // ============================================================================
 // Types
@@ -99,9 +117,9 @@ const stats = {
 async function loadCvdFromDatabase(): Promise<void> {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT ON (ticker) ticker, cvd
+      SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
       FROM "candles-1m"
-      WHERE cvd IS NOT NULL
+      WHERE cvd_close IS NOT NULL
       ORDER BY ticker, time DESC
     `);
 
@@ -122,46 +140,10 @@ async function loadCvdFromDatabase(): Promise<void> {
 // ============================================================================
 
 /**
- * Parse any timestamp format to minute bucket
- * Supports:
- * - ISO string: "2025-12-01T00:00:00.003176304Z"
- * - Nanosecond epoch string: "1768275460711927889"
- * - Nanosecond epoch number: 1768275460711927889
+ * Parse a historical TBBO JSON line into a normalized trade
+ * Returns null if the line cannot be parsed or is not a trade
  */
-function toMinuteBucket(timestamp: string | number): string {
-  let date: Date;
-
-  if (typeof timestamp === "number") {
-    // Nanosecond epoch number - convert to milliseconds
-    date = new Date(Math.floor(timestamp / 1_000_000));
-  } else if (timestamp.includes("T") || timestamp.includes("-")) {
-    // ISO string format
-    date = new Date(timestamp);
-  } else {
-    // Nanosecond epoch string - convert to milliseconds
-    date = new Date(Math.floor(parseInt(timestamp, 10) / 1_000_000));
-  }
-
-  date.setSeconds(0, 0);
-  return date.toISOString();
-}
-
-/**
- * Parse a historical TBBO JSON line
- * Handles various field names and timestamp formats
- */
-function parseHistoricalTbbo(line: string): {
-  ticker: string;
-  minuteBucket: string;
-  price: number;
-  size: number;
-  side: string;
-  symbol: string;
-  bidPrice: number;
-  askPrice: number;
-  bidSize: number;
-  askSize: number;
-} | null {
+function parseHistoricalTbbo(line: string): NormalizedTrade | null {
   try {
     const json: HistoricalTbboJson = JSON.parse(line);
 
@@ -184,15 +166,44 @@ function parseHistoricalTbbo(line: string): {
     }
 
     // Parse bid/ask prices (can be string, number, or from alternative field names)
-    const bidPrice = json.bidPrice ?? (json.bid_px ? (typeof json.bid_px === "number" ? json.bid_px : parseFloat(json.bid_px)) : 0);
-    const askPrice = json.askPrice ?? (json.ask_px ? (typeof json.ask_px === "number" ? json.ask_px : parseFloat(json.ask_px)) : 0);
+    const bidPrice =
+      json.bidPrice ??
+      (json.bid_px
+        ? typeof json.bid_px === "number"
+          ? json.bid_px
+          : parseFloat(json.bid_px)
+        : 0);
+    const askPrice =
+      json.askPrice ??
+      (json.ask_px
+        ? typeof json.ask_px === "number"
+          ? json.ask_px
+          : parseFloat(json.ask_px)
+        : 0);
+
+    const ticker = extractTicker(json.symbol);
+    const minuteBucket = toMinuteBucket(timestamp);
+
+    // Determine trade side using Lee-Ready algorithm as fallback
+    const { isAsk, isBid } = determineTradeSide(
+      json.side || "",
+      price,
+      bidPrice || 0,
+      askPrice || 0
+    );
+
+    // Track unknown side trades
+    if (!isAsk && !isBid) {
+      stats.unknownSide++;
+    }
 
     return {
-      ticker: extractTicker(json.symbol),
-      minuteBucket: toMinuteBucket(timestamp),
+      ticker,
+      minuteBucket,
       price,
       size: json.size || 0,
-      side: json.side || "",
+      isAsk,
+      isBid,
       symbol: json.symbol,
       bidPrice: bidPrice || 0,
       askPrice: askPrice || 0,
@@ -209,107 +220,20 @@ function parseHistoricalTbbo(line: string): {
 // ============================================================================
 
 /**
- * Add a trade to the candle map
+ * Add a trade to the candle map using the shared library function
  */
-function addTrade(trade: NonNullable<ReturnType<typeof parseHistoricalTbbo>>): void {
+function addTrade(trade: NormalizedTrade): void {
   const key = `${trade.ticker}|${trade.minuteBucket}`;
 
-  // Determine side
-  let isAsk = trade.side === "A";
-  let isBid = trade.side === "B";
+  // Get context for metric calculation
+  const baseCvd = cvdByTicker.get(trade.ticker) || 0;
+  const context: MetricCalculationContext = {
+    baseCvd,
+    vdStrength: 1, // No rolling history for historical data
+  };
 
-  // If side unknown, try Lee-Ready algorithm
-  if (!isAsk && !isBid && trade.bidPrice && trade.askPrice) {
-    const inferred = inferSideFromPrice(trade.price, trade.bidPrice, trade.askPrice);
-    if (inferred) {
-      isAsk = inferred === "A";
-      isBid = inferred === "B";
-    } else {
-      stats.unknownSide++;
-    }
-  } else if (!isAsk && !isBid) {
-    stats.unknownSide++;
-  }
-
-  // Calculate spread and midpoint for this trade
-  const spread = trade.askPrice > 0 && trade.bidPrice > 0 
-    ? trade.askPrice - trade.bidPrice 
-    : 0;
-  const midPrice = trade.askPrice > 0 && trade.bidPrice > 0 
-    ? (trade.askPrice + trade.bidPrice) / 2 
-    : trade.price;
-
-  // Check if this is a large trade
-  const largeTradeThreshold = getLargeTradeThreshold(trade.ticker);
-  const isLargeTrade = trade.size >= largeTradeThreshold;
-
-  const existing = candles.get(key);
-
-  if (existing) {
-    // OHLCV
-    existing.high = Math.max(existing.high, trade.price);
-    existing.low = Math.min(existing.low, trade.price);
-    existing.close = trade.price;
-    existing.volume += trade.size;
-    existing.symbol = trade.symbol;
-    existing.tradeCount++;
-
-    // Aggressive order flow
-    if (isAsk) existing.askVolume += trade.size;
-    else if (isBid) existing.bidVolume += trade.size;
-    else existing.unknownSideVolume += trade.size;
-
-    // Passive order flow (book depth)
-    existing.sumBidDepth += trade.bidSize || 0;
-    existing.sumAskDepth += trade.askSize || 0;
-
-    // Spread tracking
-    existing.sumSpread += spread;
-    existing.sumMidPrice += midPrice;
-
-    // VWAP tracking
-    existing.sumPriceVolume += trade.price * trade.size;
-
-    // Large trade detection
-    existing.maxTradeSize = Math.max(existing.maxTradeSize, trade.size);
-    if (isLargeTrade) {
-      existing.largeTradeCount++;
-      existing.largeTradeVolume += trade.size;
-    }
-  } else {
-    candles.set(key, {
-      // OHLCV
-      open: trade.price,
-      high: trade.price,
-      low: trade.price,
-      close: trade.price,
-      volume: trade.size,
-
-      // Aggressive order flow
-      askVolume: isAsk ? trade.size : 0,
-      bidVolume: isBid ? trade.size : 0,
-      unknownSideVolume: !isAsk && !isBid ? trade.size : 0,
-
-      // Passive order flow (book depth)
-      sumBidDepth: trade.bidSize || 0,
-      sumAskDepth: trade.askSize || 0,
-
-      // Spread tracking
-      sumSpread: spread,
-      sumMidPrice: midPrice,
-
-      // VWAP tracking
-      sumPriceVolume: trade.price * trade.size,
-
-      // Large trade detection
-      maxTradeSize: trade.size,
-      largeTradeCount: isLargeTrade ? 1 : 0,
-      largeTradeVolume: isLargeTrade ? trade.size : 0,
-
-      symbol: trade.symbol,
-      tradeCount: 1,
-    });
-  }
+  // Use shared candle aggregation with metrics OHLC tracking
+  addTradeAndUpdateMetrics(candles, key, trade, context);
 
   stats.tradesProcessed++;
 }
@@ -337,7 +261,6 @@ async function flushCandles(): Promise<void> {
   });
 
   // Track running CVD across all batches to ensure correct accumulation
-  // This map persists across batches within this flush operation
   const runningCvd: Map<string, number> = new Map();
 
   // Write in batches
@@ -346,7 +269,7 @@ async function flushCandles(): Promise<void> {
     await writeBatch(batch, runningCvd);
   }
 
-  // Update global CVD totals from the running CVD (which accumulated across all batches)
+  // Update global CVD totals from the running CVD
   for (const [ticker, cvd] of runningCvd) {
     cvdByTicker.set(ticker, cvd);
   }
@@ -356,110 +279,17 @@ async function flushCandles(): Promise<void> {
 }
 
 /**
- * Write a batch of candles to database
- * @param batch - Array of candles to write
- * @param runningCvd - Shared CVD accumulator across batches (mutated in place)
+ * Write a batch of candles to database with OHLC for all metrics
  */
 async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>): Promise<void> {
-  const values: (string | number | null)[] = [];
-  const placeholders: string[] = [];
+  // Create CVD context that tracks running CVD across batches
+  const cvdContext: CvdContext = {
+    getBaseCvd: (ticker: string) => runningCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0),
+    updateCvd: (ticker: string, newCvd: number) => runningCvd.set(ticker, newCvd),
+  };
 
-  batch.forEach(({ ticker, time, candle }, i) => {
-    // Calculate all order flow metrics
-    const metrics = calculateOrderFlowMetrics({
-      open: candle.open,
-      close: candle.close,
-      volume: candle.volume,
-      askVolume: candle.askVolume,
-      bidVolume: candle.bidVolume,
-      sumBidDepth: candle.sumBidDepth,
-      sumAskDepth: candle.sumAskDepth,
-      sumSpread: candle.sumSpread,
-      sumMidPrice: candle.sumMidPrice,
-      sumPriceVolume: candle.sumPriceVolume,
-      tradeCount: candle.tradeCount,
-      maxTradeSize: candle.maxTradeSize,
-      largeTradeCount: candle.largeTradeCount,
-      largeTradeVolume: candle.largeTradeVolume,
-    });
-
-    // Use running total if available (from previous batches), otherwise use stored CVD
-    const baseCvd = runningCvd.get(ticker) ?? (cvdByTicker.get(ticker) || 0);
-    const cvd = baseCvd + metrics.vd;
-    runningCvd.set(ticker, cvd);
-
-    // 24 columns total
-    const offset = i * 24;
-    placeholders.push(
-      `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
-        `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
-        `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
-        `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
-        `$${offset + 21}, $${offset + 22}, $${offset + 23}, $${offset + 24})`
-    );
-    values.push(
-      time,
-      ticker,
-      candle.symbol,
-      candle.open,
-      candle.high,
-      candle.low,
-      candle.close,
-      candle.volume,
-      metrics.vd,
-      cvd,
-      metrics.vdRatio,
-      metrics.bookImbalance,
-      metrics.pricePct,
-      metrics.vwap,
-      metrics.spreadBps,
-      metrics.trades,
-      metrics.avgTradeSize,
-      metrics.maxTradeSize,
-      metrics.bigTrades,
-      metrics.bigVolume,
-      metrics.divergence,
-      metrics.evr,
-      metrics.smp,
-      metrics.vdStrength
-    );
-  });
-
-  const query = `
-    INSERT INTO "candles-1m" (
-      time, ticker, symbol, open, high, low, close, volume,
-      vd, cvd, vd_ratio, book_imbalance,
-      price_pct, vwap, spread_bps,
-      trades, avg_trade_size,
-      max_trade_size, big_trades, big_volume,
-      divergence, evr, smp, vd_strength
-    )
-    VALUES ${placeholders.join(", ")}
-    ON CONFLICT (ticker, time) DO UPDATE SET
-      symbol = EXCLUDED.symbol,
-      open = "candles-1m".open,
-      high = GREATEST("candles-1m".high, EXCLUDED.high),
-      low = LEAST("candles-1m".low, EXCLUDED.low),
-      close = EXCLUDED.close,
-      volume = EXCLUDED.volume,
-      vd = EXCLUDED.vd,
-      cvd = EXCLUDED.cvd,
-      vd_ratio = EXCLUDED.vd_ratio,
-      book_imbalance = EXCLUDED.book_imbalance,
-      price_pct = EXCLUDED.price_pct,
-      vwap = EXCLUDED.vwap,
-      spread_bps = EXCLUDED.spread_bps,
-      trades = EXCLUDED.trades,
-      avg_trade_size = EXCLUDED.avg_trade_size,
-      max_trade_size = GREATEST("candles-1m".max_trade_size, EXCLUDED.max_trade_size),
-      big_trades = EXCLUDED.big_trades,
-      big_volume = EXCLUDED.big_volume,
-      divergence = EXCLUDED.divergence,
-      evr = EXCLUDED.evr,
-      smp = EXCLUDED.smp,
-      vd_strength = EXCLUDED.vd_strength
-    WHERE EXCLUDED.volume >= "candles-1m".volume
-  `;
+  const { values, placeholders } = buildCandleInsertParams(batch, cvdContext);
+  const query = buildCandleInsertQuery(placeholders);
 
   await pool.query(query, values);
   stats.candlesWritten += batch.length;
@@ -525,7 +355,7 @@ async function main(): Promise<void> {
   }
 
   console.log("═".repeat(60));
-  console.log("📊 Historical TBBO Processor");
+  console.log("📊 Historical TBBO Processor (with OHLC metrics)");
   console.log("═".repeat(60));
   console.log(`   Files to process: ${files.length}`);
   console.log("");
