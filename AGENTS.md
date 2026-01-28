@@ -378,3 +378,46 @@ FROM "candles-1m"
 WHERE ticker = 'ES'
 ORDER BY time DESC;
 ```
+
+---
+
+#### `vd_strength` - Delta Momentum / Acceleration
+
+**Formula:** `|current VD| / average(|recent VD|)` over 5-minute rolling window
+
+**What it measures:** Whether the current aggressive pressure is accelerating or decelerating compared to recent activity. This is a momentum indicator that helps predict trend continuation vs exhaustion.
+
+**Values:** Positive decimal (typically 0.2 to 3.0)
+
+| Value | Interpretation |
+|-------|----------------|
+| > 1.5 | **Accelerating** - Current pressure is 50%+ above recent average |
+| 1.0 - 1.5 | **Steady** - Pressure is at or slightly above average |
+| 0.7 - 1.0 | **Decelerating** - Pressure is weakening |
+| < 0.7 | **Exhaustion** - Pressure has dropped significantly below average |
+
+**Key insight:** This metric answers: "Is the buying/selling pressure getting stronger or weaker?"
+
+**Trading signals:**
+
+- **Trend continuation:** `vd_strength > 1.2` + same VD direction as recent candles
+- **Potential exhaustion:** `vd_strength < 0.7` + strong VD in one direction (pressure fading)
+- **Breakout confirmation:** `vd_strength > 1.5` + high `big_trades` (institutions accelerating)
+
+**Combined with SMP:**
+- High SMP + high vd_strength = Strong trend, likely continuation
+- High SMP + low vd_strength = Trend may be exhausting
+- Low SMP + high vd_strength = Conflicting signals, watch for reversal
+
+**Example:**
+```sql
+-- Find exhaustion setups (strong imbalance but fading pressure)
+SELECT time, close, vd_ratio, vd_strength, smp
+FROM "candles-1m"
+WHERE ticker = 'ES'
+  AND ABS(vd_ratio) > 0.3    -- Strong imbalance
+  AND vd_strength < 0.7      -- But pressure is fading
+ORDER BY time DESC;
+```
+
+**Note:** For historical data imports, `vd_strength` defaults to 1.0 since rolling history isn't available. Real-time streaming data will have accurate momentum values.

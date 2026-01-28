@@ -35,6 +35,8 @@ CREATE TABLE "candles-1m" (
     evr DOUBLE PRECISION,             -- Effort vs Result absorption score
     -- Composite Score
     smp SMALLINT,                     -- Smart Money Pressure (-100 to +100)
+    -- Momentum
+    vd_strength DOUBLE PRECISION,     -- Current VD vs 5-min average (>1 = accelerating)
     PRIMARY KEY (ticker, time)
 );
 
@@ -85,6 +87,9 @@ ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS evr DOUBLE PRECISION;
 
 -- Composite score
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS smp SMALLINT;
+
+-- Momentum
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd_strength DOUBLE PRECISION;
 
 -- If migrating from old schema with momentum column, drop it
 ALTER TABLE "candles-1m" DROP COLUMN IF EXISTS momentum;

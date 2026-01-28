@@ -37,6 +37,9 @@ export type { TbboRecord } from "./types.js";
 // Main Aggregator Class
 // ============================================================================
 
+/** Number of candles to track for rolling momentum calculations */
+const MOMENTUM_WINDOW = 5;
+
 /**
  * Aggregates TBBO records into 1-minute candles with VD and CVD tracking
  */
@@ -50,6 +53,9 @@ export class TbboAggregator {
 
   /** Cumulative Volume Delta per ticker - persists across minutes */
   private cvdByTicker: Map<string, number> = new Map();
+
+  /** Rolling VD history per ticker for momentum calculations (most recent last) */
+  private vdHistoryByTicker: Map<string, number[]> = new Map();
 
   /** Whether initialize() has been called */
   private initialized = false;
@@ -395,15 +401,68 @@ export class TbboAggregator {
   }
 
   /**
-   * Finalize completed candles: update CVD totals and remove from memory
+   * Finalize completed candles: update CVD totals, VD history, and remove from memory
    */
   private finalizeCompletedCandles(candles: CandleForDb[]): void {
     for (const { key, ticker, candle } of candles) {
       const vd = calculateVd(candle.askVolume, candle.bidVolume);
+
+      // Update CVD
       const currentCvd = this.cvdByTicker.get(ticker) || 0;
       this.cvdByTicker.set(ticker, currentCvd + vd);
+
+      // Update VD history for momentum calculations
+      this.updateVdHistory(ticker, vd);
+
       this.candles.delete(key);
     }
+  }
+
+  /**
+   * Update rolling VD history for a ticker (keeps last MOMENTUM_WINDOW values)
+   */
+  private updateVdHistory(ticker: string, vd: number): void {
+    const history = this.vdHistoryByTicker.get(ticker) || [];
+    history.push(vd);
+
+    // Keep only the last MOMENTUM_WINDOW values
+    if (history.length > MOMENTUM_WINDOW) {
+      history.shift();
+    }
+
+    this.vdHistoryByTicker.set(ticker, history);
+  }
+
+  /**
+   * Get rolling VD metrics for momentum calculation
+   * @returns { vdSma: average VD, vdStrength: current VD relative to average }
+   */
+  getVdMomentum(ticker: string, currentVd: number): { vdSma: number; vdStrength: number } {
+    const history = this.vdHistoryByTicker.get(ticker) || [];
+
+    if (history.length === 0) {
+      // No history yet, return neutral values
+      return { vdSma: currentVd, vdStrength: 1 };
+    }
+
+    // Calculate simple moving average of recent VD
+    const vdSma = history.reduce((sum, v) => sum + v, 0) / history.length;
+
+    // Calculate strength: how current VD compares to recent average
+    // Use absolute values to compare magnitude, then apply sign
+    const avgAbsVd = history.reduce((sum, v) => sum + Math.abs(v), 0) / history.length;
+
+    if (avgAbsVd === 0) {
+      // No recent activity, current VD is the signal
+      return { vdSma: 0, vdStrength: currentVd !== 0 ? 2 : 1 };
+    }
+
+    // vdStrength > 1 means current pressure is stronger than recent average
+    // vdStrength < 1 means current pressure is weaker than recent average
+    // Sign indicates if it's in same direction as recent trend
+    const vdStrength = Math.abs(currentVd) / avgAbsVd;
+
+    return { vdSma, vdStrength };
   }
 
   // =========================================================================
@@ -433,7 +492,7 @@ export class TbboAggregator {
           price_pct, vwap, spread_bps,
           trades, avg_trade_size,
           max_trade_size, big_trades, big_volume,
-          divergence, evr, smp
+          divergence, evr, smp, vd_strength
         )
         VALUES ${placeholders.join(", ")}
         ON CONFLICT (ticker, time) DO UPDATE SET
@@ -457,7 +516,8 @@ export class TbboAggregator {
           big_volume = EXCLUDED.big_volume,
           divergence = EXCLUDED.divergence,
           evr = EXCLUDED.evr,
-          smp = EXCLUDED.smp
+          smp = EXCLUDED.smp,
+          vd_strength = EXCLUDED.vd_strength
         WHERE EXCLUDED.volume >= "candles-1m".volume
       `;
 
@@ -484,6 +544,10 @@ export class TbboAggregator {
     const batchCvd: Map<string, number> = new Map();
 
     candles.forEach(({ ticker, time, candle }, i) => {
+      // Calculate VD first to get momentum
+      const currentVd = calculateVd(candle.askVolume, candle.bidVolume);
+      const { vdStrength } = this.getVdMomentum(ticker, currentVd);
+
       // Calculate all order flow metrics
       const metrics = calculateOrderFlowMetrics({
         open: candle.open,
@@ -496,6 +560,7 @@ export class TbboAggregator {
         sumSpread: candle.sumSpread,
         sumMidPrice: candle.sumMidPrice,
         sumPriceVolume: candle.sumPriceVolume,
+        vdStrength,
         tradeCount: candle.tradeCount,
         maxTradeSize: candle.maxTradeSize,
         largeTradeCount: candle.largeTradeCount,
@@ -507,14 +572,14 @@ export class TbboAggregator {
       const cvd = baseCvd + metrics.vd;
       batchCvd.set(ticker, cvd);
 
-      // 23 columns total
-      const offset = i * 23;
+      // 24 columns total
+      const offset = i * 24;
       placeholders.push(
         `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
           `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
           `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
           `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
-          `$${offset + 21}, $${offset + 22}, $${offset + 23})`
+          `$${offset + 21}, $${offset + 22}, $${offset + 23}, $${offset + 24})`
       );
       values.push(
         time,
@@ -539,7 +604,8 @@ export class TbboAggregator {
         metrics.bigVolume,
         metrics.divergence,
         metrics.evr,
-        metrics.smp
+        metrics.smp,
+        metrics.vdStrength
       );
     });
 

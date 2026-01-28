@@ -216,6 +216,10 @@ export interface OrderFlowMetrics {
   // Composite score
   /** Smart Money Pressure: -100 to +100 institutional-weighted directional score */
   smp: number;
+
+  // Momentum indicators (require rolling history)
+  /** VD Strength: current |VD| / recent average |VD| (>1 = above average pressure) */
+  vdStrength: number;
 }
 
 /**
@@ -509,6 +513,10 @@ export interface OrderFlowInput {
   maxTradeSize: number;
   largeTradeCount: number;
   largeTradeVolume: number;
+
+  // Momentum (optional, provided by aggregator with rolling history)
+  /** VD strength from rolling average (default 1 if not provided) */
+  vdStrength?: number;
 }
 
 /**
@@ -549,6 +557,7 @@ export interface SmpInput {
   evr: number | null;      // Effort vs Result (absorption indicator)
   divergence: -1 | 0 | 1;  // Price-delta divergence flag
   spreadBps: number;       // Spread in basis points
+  vdStrength?: number;     // VD momentum strength (>1 = accelerating)
 }
 
 /**
@@ -581,7 +590,7 @@ export interface SmpInput {
  * @returns SMP score bounded -100 to +100
  */
 export function calculateSmp(input: SmpInput): number {
-  const { vdRatio, bookImbalance, bigVolume, volume, evr, divergence, spreadBps } = input;
+  const { vdRatio, bookImbalance, bigVolume, volume, evr, divergence, spreadBps, vdStrength = 1 } = input;
 
   // 1. BASE SIGNAL: vdRatio scaled to -50 to +50
   // This is the primary directional component
@@ -593,6 +602,19 @@ export function calculateSmp(input: SmpInput): number {
   const bigTradeRatio = volume > 0 ? bigVolume / volume : 0;
   const institutionalMultiplier = 1 + bigTradeRatio;
   score *= institutionalMultiplier;
+
+  // 2b. MOMENTUM WEIGHT: Amplify when pressure is accelerating
+  // vdStrength > 1 means current pressure exceeds recent average
+  // Cap the boost to avoid extreme values
+  if (vdStrength > 1) {
+    // Accelerating momentum - boost score up to 30%
+    const momentumBoost = Math.min(vdStrength - 1, 0.5) * 0.6; // Max 30% boost
+    score *= (1 + momentumBoost);
+  } else if (vdStrength < 0.7) {
+    // Decelerating momentum (below 70% of average) - dampen score
+    // This indicates exhaustion even if direction is strong
+    score *= 0.8;
+  }
 
   // 3. BOOK CONFLUENCE: Add ±15 if passive order book confirms direction
   // Positive book_imbalance = more bid depth (bullish support)
@@ -704,11 +726,15 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
   const bigTrades = largeTradeCount;
   const bigVolume = largeTradeVolume;
 
+  // Momentum (from rolling history, default to 1 if not provided)
+  const vdStrength = input.vdStrength ?? 1;
+
   // Absorption detection (using normalized values for better thresholding)
   const divergence = calculateDivergence(pricePct, vdRatio);
   const evr = calculateEvr(pricePct, vdRatio);
 
   // Smart Money Pressure: Composite institutional-weighted score
+  // Now also factors in momentum strength
   const smp = calculateSmp({
     vdRatio,
     bookImbalance,
@@ -717,6 +743,7 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
     evr,
     divergence,
     spreadBps,
+    vdStrength, // Add momentum to SMP calculation
   });
 
   return {
@@ -734,5 +761,6 @@ export function calculateOrderFlowMetrics(input: OrderFlowInput): OrderFlowMetri
     divergence,
     evr,
     smp,
+    vdStrength,
   };
 }

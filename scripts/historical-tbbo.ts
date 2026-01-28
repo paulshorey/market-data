@@ -388,14 +388,14 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
     const cvd = baseCvd + metrics.vd;
     runningCvd.set(ticker, cvd);
 
-    // 23 columns total
-    const offset = i * 23;
+    // 24 columns total
+    const offset = i * 24;
     placeholders.push(
       `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, ` +
         `$${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, ` +
         `$${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, ` +
         `$${offset + 16}, $${offset + 17}, $${offset + 18}, $${offset + 19}, $${offset + 20}, ` +
-        `$${offset + 21}, $${offset + 22}, $${offset + 23})`
+        `$${offset + 21}, $${offset + 22}, $${offset + 23}, $${offset + 24})`
     );
     values.push(
       time,
@@ -420,7 +420,8 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       metrics.bigVolume,
       metrics.divergence,
       metrics.evr,
-      metrics.smp
+      metrics.smp,
+      metrics.vdStrength
     );
   });
 
@@ -431,7 +432,7 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       price_pct, vwap, spread_bps,
       trades, avg_trade_size,
       max_trade_size, big_trades, big_volume,
-      divergence, evr, smp
+      divergence, evr, smp, vd_strength
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
@@ -455,7 +456,8 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
       big_volume = EXCLUDED.big_volume,
       divergence = EXCLUDED.divergence,
       evr = EXCLUDED.evr,
-      smp = EXCLUDED.smp
+      smp = EXCLUDED.smp,
+      vd_strength = EXCLUDED.vd_strength
     WHERE EXCLUDED.volume >= "candles-1m".volume
   `;
 
