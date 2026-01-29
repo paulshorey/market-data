@@ -314,7 +314,7 @@ function parseTbboRecord(json: string): TbboRecord | null {
       symbol,
       price,
       size: parseInt(data.size, 10) || 0,
-      side: data.side, // 'A' (ask/sell) or 'B' (bid/buy)
+      side: data.side, // 'A' = ask (buy aggressor), 'B' = bid (sell aggressor)
       bidPrice,
       askPrice,
       bidSize: parseInt(level.bid_sz, 10) || 0,

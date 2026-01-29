@@ -528,33 +528,30 @@ Notice this is not a valid JSON file. It is a text list of JSON objects (JSONL f
 
 ### Real-time streaming data
 
-Real-time data from Databento uses a similar structure but with **fixed-point integer prices** that must be multiplied by `1e-9`. The symbol is resolved via `instrument_id` lookup (from rtype=22 mapping messages).
+Real-time data from Databento uses fixed-point prices (strings) that must be multiplied by `1e-9`. Symbol is resolved via `instrument_id` lookup from rtype=22 mapping messages.
 
 **Key differences from historical:**
 
-- Prices are fixed-point integers (e.g., `6913500000000` → `6913.50` after × 1e-9)
-- Symbol is NOT included directly - must be resolved from `instrument_id` via mapping
-- Timestamps are nanosecond epochs as integers/strings
+- Prices are fixed-point integers as strings (e.g., `"7011000000000"` → `7011.0` after × 1e-9)
+- Symbol NOT included - resolved from `instrument_id` via mapping
+- Timestamps are nanosecond epochs as strings
 
-**Expected format (captured from `🔍 Raw TBBO` logs):**
+**Example streaming TBBO events (from console logs):**
 
-```json
-{
-  "hd": { "ts_event": 1732921200000000000, "rtype": 1, "publisher_id": 1, "instrument_id": 42140878 },
-  "action": "T",
-  "side": "A",
-  "depth": 0,
-  "price": 6913500000000,
-  "size": 5,
-  "flags": 0,
-  "ts_recv": 1732921200039353882,
-  "ts_in_delta": 13803,
-  "sequence": 3353,
-  "levels": [{ "bid_px": 6913250000000, "ask_px": 6913750000000, "bid_sz": 100, "ask_sz": 150, "bid_ct": 10, "ask_ct": 15 }]
-}
+```
+{"ts_recv":"1769642638977513181","hd":{"ts_event":"1769642638977303721","rtype":1,"publisher_id":1,"instrument_id":42140878},"action":"T","side":"B","depth":0,"price":"7011000000000","size":1,"flags":0,"ts_in_delta":13047,"sequence":29159628,"levels":[{"bid_px":"7010750000000","ask_px":"7011000000000","bid_sz":11,"ask_sz":3,"bid_ct":11,"ask_ct":2}],"ts_out":"1769642638977537040"}
+{"ts_recv":"1769642639328285069","hd":{"ts_event":"1769642639328032129","rtype":1,"publisher_id":1,"instrument_id":42140878},"action":"T","side":"A","depth":0,"price":"7011000000000","size":4,"flags":0,"ts_in_delta":13478,"sequence":29159700,"levels":[{"bid_px":"7011000000000","ask_px":"7011250000000","bid_sz":4,"ask_sz":13,"bid_ct":4,"ask_ct":9}],"ts_out":"1769642639328396121"}
 ```
 
-**To capture actual format:** Run the streaming service and check console output for `🔍 Raw TBBO #N:` log lines which print the first 5 trade records received.
+**Parsed values from first example:**
+
+- `price`: `"7011000000000"` × 1e-9 = `7011.0`
+- `bid_px`: `"7010750000000"` × 1e-9 = `7010.75`
+- `ask_px`: `"7011000000000"` × 1e-9 = `7011.0`
+- `side`: `"B"` (bid/sell aggressor)
+- `size`: `1` contract
+
+**To capture format:** Run streaming service and check `🔍 Raw TBBO #N:` log lines.
 
 ## TODO:
 
@@ -567,5 +564,4 @@ The `vd_strength` metric requires a rolling 5-minute history of VD values to cal
 - If historical momentum is needed, consider post-processing queries to calculate rolling averages
 
 **Solution:**
-`scripts/historical-tbbo.ts` should remember the last 5 minutes in memory.
-This will be no porblem, because the script will process a whole week or month of data at one time. When it restarts to work on the next file, there will be a 5-minute gap in vd_strength calculation, but that's ok because it will be very rare.
+`scripts/historical-tbbo.ts` should remember the last 5 minutes in memory. Since the script processes a whole week or month at once, this is straightforward. There may be a 5-minute gap when processing restarts on a new file, but this is rare and acceptable.
