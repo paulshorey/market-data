@@ -7,7 +7,7 @@ Multi-timeframe financial data pipeline for futures and crypto. Ingests live tra
 Standard platforms calculate a 60-minute candle once per hour. This platform calculates it **every minute** using a sliding window over the previous 60 minutes. This means:
 
 - A 60m table has one row per minute (not per hour), each representing the trailing 60-minute window
-- `minute_index` cycles 1-60, identifying which phase of the timeframe the row represents
+- `minute_index` cycles 0-59, identifying which phase of the timeframe the row represents
 - Indicators like RSI are calculated per minute_index independently (60 separate RSI calculators for a 60m timeframe)
 - Backtesting can evaluate any timeframe at any minute, not just at period boundaries
 
@@ -102,7 +102,7 @@ Key schema elements:
 - Column names: snake_case in DB, camelCase in TypeScript
 - All symbols share one table, differentiated by `symbol` column
 - Indicators stored in same row as OHLCV (no JOINs needed)
-- `minute_index` cycles 1 to N for an N-minute timeframe
+- `minute_index` cycles 0 to N-1 for an N-minute timeframe
 
 ## Project Structure
 

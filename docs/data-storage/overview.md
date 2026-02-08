@@ -45,7 +45,7 @@ CREATE INDEX idx_ohlcv_1m_ts ON ohlcv_1m (ts DESC);
 CREATE TABLE ohlcv_60m (
     symbol        VARCHAR(20) NOT NULL,
     ts            TIMESTAMPTZ NOT NULL,
-    minute_index  SMALLINT NOT NULL,  -- cycles 1 to 60
+    minute_index  SMALLINT NOT NULL,  -- cycles 0 to 59
 
     -- Aggregated OHLCV (sliding window over past 60 1m candles)
     open          NUMERIC(18,8),
@@ -81,11 +81,11 @@ Repeat for each timeframe, adjusting table name and minute_index cycle length.
 
 ## How minute_index Works
 
-For a 60-minute timeframe, `minute_index` cycles 1 through 60. Each value represents a "phase" of the hourly window:
+For a 60-minute timeframe, `minute_index` cycles 0 through 59. Each value represents a "phase" of the hourly window:
 
-- minute_index=1: rows at 10:00, 11:00, 12:00... (each 60 mins apart)
-- minute_index=2: rows at 10:01, 11:01, 12:01... (each 60 mins apart)
-- minute_index=31: rows at 10:30, 11:30, 12:30... (each 60 mins apart)
+- minute_index=0: rows at 10:00, 11:00, 12:00... (each 60 mins apart)
+- minute_index=1: rows at 10:01, 11:01, 12:01... (each 60 mins apart)
+- minute_index=30: rows at 10:30, 11:30, 12:30... (each 60 mins apart)
 
 This means rows sharing the same minute_index form a series where consecutive entries are exactly one timeframe period apart -- exactly what indicators need.
 
@@ -159,10 +159,10 @@ ORDER BY ts;
 │ ┌───────┬───────────┬─────┬──────┬──────┬─────┬───────┐ │
 │ │symbol │ ts        │ idx │ open │ high │ ... │ rsi_14│ │
 │ ├───────┼───────────┼─────┼──────┼──────┼─────┼───────┤ │
-│ │ ES    │ 10:00     │  1  │ agg  │ agg  │ ... │ 54.2  │ │
-│ │ ES    │ 10:01     │  2  │ agg  │ agg  │ ... │ 55.1  │ │
-│ │ ES    │ 10:02     │  3  │ agg  │ agg  │ ... │ 53.8  │ │
-│ │ NQ    │ 10:00     │  1  │ agg  │ agg  │ ... │ 48.7  │ │
+│ │ ES    │ 10:00     │  0  │ agg  │ agg  │ ... │ 54.2  │ │
+│ │ ES    │ 10:01     │  1  │ agg  │ agg  │ ... │ 55.1  │ │
+│ │ ES    │ 10:02     │  2  │ agg  │ agg  │ ... │ 53.8  │ │
+│ │ NQ    │ 10:00     │  0  │ agg  │ agg  │ ... │ 48.7  │ │
 │ └───────┴───────────┴─────┴──────┴──────┴─────┴───────┘ │
 └─────────────────────────────────────────────────────────┘
 ```

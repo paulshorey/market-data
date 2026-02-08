@@ -4,10 +4,10 @@ This document explains how to calculate technical indicators (RSI, EMA, etc.) fo
 
 ## Strategy
 
-Each higher-timeframe table (e.g., `ohlcv_60m`) has rows for every minute, with `minute_index` cycling 1 to N. Rows with the same `minute_index` are spaced exactly N minutes apart, forming an independent time series suitable for indicator calculation.
+Each higher-timeframe table (e.g., `ohlcv_60m`) has rows for every minute, with `minute_index` cycling 0 to N-1. Rows with the same `minute_index` are spaced exactly N minutes apart, forming an independent time series suitable for indicator calculation.
 
 ```
-For each minute_index (1 to 60) in parallel:
+For each minute_index (0 to 59) in parallel:
   1. Query: SELECT ts, close FROM ohlcv_60m
             WHERE symbol='ES' AND minute_index=X
             ORDER BY ts

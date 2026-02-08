@@ -8,17 +8,17 @@ For the core concept of how minute_index-based indicator calculation works, see 
 
 RSI with Wilder's smoothing is sequential -- each value depends on the previous. But the RSI at minute_index=2 doesn't depend on minute_index=1. Each minute_index forms its own independent series:
 
-1. minute_index=1 calculates based on previous values at 9:01, 8:01, 7:01...
-2. minute_index=2 calculates based on previous values at 9:02, 8:02, 7:02...
-3. minute_index=3 calculates based on previous values at 9:03, 8:03, 7:03...
+1. minute_index=0 calculates based on previous values at 9:00, 8:00, 7:00...
+2. minute_index=1 calculates based on previous values at 9:01, 8:01, 7:01...
+3. minute_index=2 calculates based on previous values at 9:02, 8:02, 7:02...
 
 So we maintain **60 independent RSI calculators** for a 60-minute timeframe. Each has its own smoothed average state.
 
 | Timeframe | minute_index range | RSI Calculators |
 |-----------|-------------------|-----------------|
-| 1m | Always 1 | 1 |
-| 60m | Cycles 1-60 | 60 |
-| 1440m | Cycles 1-1440 | 1440 |
+| 1m | Always 0 | 1 |
+| 60m | Cycles 0-59 | 60 |
+| 1440m | Cycles 0-1439 | 1440 |
 
 ## RSI Calculation (Wilder's Smoothing)
 
