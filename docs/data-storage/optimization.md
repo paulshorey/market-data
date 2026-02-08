@@ -1,4 +1,6 @@
-# PostgreSQL Optimization for Your Financial Time-Series Workload
+# PostgreSQL Optimization
+
+> For database schema design, see [overview.md](./overview.md). This document covers performance optimization techniques.
 
 ## Composite Partitioning
 

@@ -1,80 +1,77 @@
-# Question:
+# Pivot Detection Methods
 
-I am planning to build a custom technical analysis backtesting tool. Mostly concerned about a specific data analysis challenge:
+Research on detecting swing highs and lows programmatically, for use in timing analysis and trajectory prediction.
 
-Detecting if the current price is at a pivot high or pivot low.
+**Implementation status:** This is research/planning. No pivot detection is implemented in the codebase yet.
 
-Determining the highs and lows, pivot points is easy enough by looking at past historical data. If I wait enough time, 10+ bars, when the price moved significantly higher or lower, I would be able to tell where was the last pivot point.
+## The Problem
 
-So I will keep track of recent pivot highs and pivot lows. This is only for past data. But it can help to provide context to understand where the current price is in relation to historical highs or lows.
+Detecting if the current price is at a pivot high or low requires looking forward -- a pivot isn't confirmed until price moves away from it. The challenge is balancing early detection (useful for trading) against false positives (repainting).
 
-I need more advanced predictive modeling.
+## Three Core Methods
 
-X-axis:
-I need to calculate a running average of the wavelength between recent swing highs and lows, compared to the time distance from the last pivot until current time. To analyze timing between the current price and the previous high or low, compared to the timing of the last high or low to the previous high or low. This could be as simple as remembering the distance between the previous peaks or valleys compared to the distance between the previous peak or valley and the current price. Or it could be as complex as considering other cycle theory concepts.
+### 1. scipy's `find_peaks`
 
-Y-axis:
-I also need predictive modeling to compare the current price to previous highs and lows. If it's in line with the trajectory, then it has better probability of being a pivot point. If recently there was a low and then another low two points higher than that, and the current price is two points higher than that, that is higher probability that we're at the next pivot low because the points line up.
+Most flexible approach. Works on any numerical array with configurable prominence, distance, and height filtering.
 
-Research:
-Is there a library in any language that already takes these things into account to analyze time series data? What is the best library and what is the best language for this?
+```python
+from scipy.signal import find_peaks
 
----
+def detect_pivots(df, prominence=None, distance=5):
+    peaks_high, _ = find_peaks(df['high'].values,
+                                prominence=prominence, distance=distance)
+    peaks_low, _ = find_peaks(-df['low'].values,
+                               prominence=prominence, distance=distance)
+    return peaks_high, peaks_low
+```
 
-# Answer:
+### 2. Williams Fractals
 
-Based on my research, here's what I found:
+Rule-based: the middle bar of 5 must be the highest (bearish fractal) or lowest (bullish fractal) compared to 2 bars on each side. Available in Backtrader (`bt.indicators.Fractal`) and stock-indicators (`get_fractal(quotes, 5)`).
 
-## The Short Answer
+2-bar confirmation delay prevents repainting but sacrifices early detection.
 
-**Python with TA-Lib + scipy.signal + VectorBT** is the optimal stack. No single library handles everything you need, but this combination covers all your requirements.
+### 3. Rolling Window Extrema
 
-## Why These Three Libraries
+Adjustable sensitivity via lookback period. Smaller windows (2-3 bars) = more signals, more false positives. Larger windows (10+) = fewer, more reliable pivots.
 
-| Your Requirement     | Best Tool                        | Why                                                                           |
-| -------------------- | -------------------------------- | ----------------------------------------------------------------------------- |
-| Pivot detection      | `scipy.signal.find_peaks()`      | Flexible parameters for prominence, distance, noise filtering                 |
-| X-axis timing/cycles | TA-Lib's Hilbert Transform suite | Only library with proper cycle period detection (`HT_DCPERIOD`, `HT_DCPHASE`) |
-| Y-axis trajectory    | Custom code + trendln            | No library does this out-of-box; trendln helps with trendline fitting         |
-| Backtesting          | VectorBT                         | 1M orders in ~100ms via Numba JIT; far faster than Backtrader                 |
+```python
+def detect_swing_points(df, left_bars=5, right_bars=5):
+    high, low = df['high'], df['low']
+    swing_high = (
+        (high >= high.rolling(left_bars).max().shift(1)) &
+        (high >= high.rolling(right_bars).max().shift(-right_bars))
+    )
+    swing_low = (
+        (low <= low.rolling(left_bars).min().shift(1)) &
+        (low <= low.rolling(right_bars).min().shift(-right_bars))
+    )
+    return swing_high, swing_low
+```
 
-## For Your X-Axis (Timing Analysis)The trajectory analysis output shows exactly your scenario working: ascending lows at 100 → 102, with current price at 104 gives **perfect alignment (R² = 1.0)** and **90% combined probability**.
+## The Repainting Problem
 
-## Key Findings
+Zigzag indicators redraw as price continues. No perfect solution exists. Non-repainting versions simply delay signals until confirmation. Momentum-based confirmation (MACD or RSI reversals to lock in pivots) offers the best balance.
 
-**No single library does what you want.** Here's why you need to combine them:
+## Two-Axis Prediction Approach
 
-| Library          |   X-Axis (Timing/Cycles)   | Y-Axis (Trajectory) | Built-in? |
-| ---------------- | :------------------------: | :-----------------: | :-------: |
-| TA-Lib           | ✅ Hilbert Transform suite |         ❌          |    No     |
-| scipy.signal     |     ✅ `find_peaks()`      |         ❌          |    No     |
-| stock-indicators |       ⚠️ ZigZag only       |         ❌          |    No     |
-| R's TTR          | ✅ `ZigZag()` + `pivots()` |         ❌          |    No     |
+### X-axis (Timing)
+Calculate a running average of wavelength (distance in bars) between recent swing highs/lows. Compare to the current distance from last pivot. If the current distance approaches the historical average, there's higher probability of a new pivot forming.
 
-**The trajectory alignment concept you described doesn't exist in any library.** You'll need to implement it yourself (I've provided starter code above).
+See [scripts/pivot-timing-analysis.py](./scripts/pivot-timing-analysis.py) for implementation using scipy + TA-Lib Hilbert Transform.
 
-## What TA-Lib Uniquely Provides
+### Y-axis (Trajectory)
+Compare current price to the trajectory of previous pivots. If recent lows are at 100, 102, 104 and current price is at 106, that linear alignment increases the probability of being at a pivot.
 
-TA-Lib's Hilbert Transform functions are irreplaceable for cycle analysis:
+See [scripts/pivot-trajectory-analysis.py](./scripts/pivot-trajectory-analysis.py) for implementation using linear regression on pivot sequences.
 
-- `HT_DCPERIOD` — Estimates current dominant cycle length in bars
-- `HT_DCPHASE` — Where you are in the cycle (0-360°)
-- `HT_SINE` / `HT_TRENDMODE` — Cycle visualization and trend detection
+## Recommended Stack
 
-No other library implements these. If cycle theory matters to you, TA-Lib is mandatory.
+| Requirement | Tool |
+|-------------|------|
+| Pivot detection | `scipy.signal.find_peaks()` |
+| X-axis timing/cycles | TA-Lib Hilbert Transform (`HT_DCPERIOD`, `HT_DCPHASE`) |
+| Y-axis trajectory | Custom linear regression |
+| Backtesting | VectorBT (1M orders in ~100ms via Numba JIT) |
 
-## My Recommendation
-
-**Python** with this stack:
-
-1. **scipy.signal** — Pivot detection with `find_peaks(prominence=..., distance=...)`
-2. **TA-Lib** — Cycle analysis (Hilbert Transform)
-3. **VectorBT** — Backtesting (1M orders in ~100ms)
-4. **Custom code** — Your wavelength comparison and trajectory alignment logic
-
-The two Python files I created demonstrate the core algorithms for both your X-axis (wavelength timing) and Y-axis (trajectory alignment) requirements. They're designed to be combined into a unified probability score.
-
-## Files
-
-- scripts/pivot-timing-analysis.py
-- scripts/pivot-trajectory-analysis.py
+No single library handles all of these. The trajectory alignment concept doesn't exist in any library and must be built custom.

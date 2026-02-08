@@ -1,4 +1,8 @@
-# Building a systematic order flow analysis system for CME futures
+# Order Flow Analysis: Research Notes
+
+> **Status:** Research reference. Core metrics (VD, CVD, book imbalance, EVR, SMP, divergence) are implemented in `src/lib/metrics/`. Advanced concepts below (VPIN, footprint charts, volume profile) are not yet implemented.
+
+## Building a systematic order flow analysis system for CME futures
 
 **Order flow analysis provides the most reliable confluence signals for momentum trading when implemented algorithmically using three core metrics: Order Flow Imbalance (OFI), delta divergence patterns, and volume profile structure.** Academic research demonstrates OFI explains **65-70% of contemporaneous price changes** at 10-second intervals, while practitioners report 70%+ win rates when combining footprint imbalances with technical levels. For CME equity index futures (ES, NQ, RTY) and COMEX metals (GC, SI), the optimal approach builds real-time detection systems for absorption, exhaustion, and continuation patterns from TBBO tick data—using specific thresholds like **3:1 imbalance ratios**, **800+ delta for ES** breakout confirmation, and VPIN toxicity monitoring for adverse selection risk.
 

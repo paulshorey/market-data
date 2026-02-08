@@ -1,115 +1,89 @@
-# Question:
+# Backtesting Engine: In-Memory Architecture
 
-## Backtesting Framework Architecture: Data Processing at Scale
+How to iterate through millions of minutes across multiple timeframes with a user's strategy function, while maintaining a 5,000-bar lookback window per timeframe.
 
-When running analysis on multiple timeframes across the entire available dataset, we'll need a script that iterates through every minute of each table from the beginning. Since users may want to combine logic from multiple timeframes and compare them against each other, running the script on each table independently won't be sufficient.
+## The Challenge
 
-### The Core Challenge
+A backtest iterates through ~5 million minutes. At each step, the user's strategy needs access to:
+- The last 5,000 bars of each timeframe (10 timeframes = 50,000 data points)
+- All OHLCV + indicator fields for each bar
 
-How can we run an indicator or strategy script on millions of minutes across multiple tables while making all timeframes available to that script?
+The strategy function runs ~5 million times. Each invocation must be fast.
 
-Not all data points need to be available at all times. TradingView allows looking back at the past 5,000 bars for each timeframe. QuantConnect uses something similar, though with a smaller number. Let's use TradingView as the standard since it offers the highest lookback.
+## Architecture
 
-This means allowing the user's strategy to access the past 5,000 items in each timeframe array. With 10 timeframes, that's 5,000 × 10 = 50,000 data points. That doesn't seem problematic—any JavaScript engine, whether browser or server-side, can process 50,000 data points nearly instantly.
+### 1. Pre-load data into typed arrays
 
-### Architecture Considerations
-
-The real challenge is structuring the architecture, logic, database queries, and server memory allocation to support a rolling, sliding window of 5,000 data points across 10 different JavaScript arrays—incremented approximately 5 million times.
-At the start of the available data, we would skip forward 5,000 minutes and begin there. At that point, we'd have 10 arrays of 5,000 items for the user's strategy to evaluate. After their strategy function processes that state, we add the next minute and run the function again. Then the next, and the next—roughly 5 million times.
-
----
-
-# Answer:
-
-## Recommended Architecture
-
-### 1. Pre-load all data into typed arrays, not objects
-
-This is the single biggest optimization. Instead of arrays of objects like `[{open: 1.23, high: 1.24, ...}, ...]`, use `Float64Array` buffers — one per column, per timeframe:
+Use `Float64Array` buffers (one per column, per timeframe) instead of arrays of objects. This cuts memory 3-5x and improves iteration speed due to cache locality.
 
 ```js
 const timeframes = {
-  "1m": {
-    open: new Float64Array(5_000_000),
-    high: new Float64Array(5_000_000),
-    low: new Float64Array(5_000_000),
-    close: new Float64Array(5_000_000),
+  '1m':  {
+    open:   new Float64Array(5_000_000),
+    high:   new Float64Array(5_000_000),
+    low:    new Float64Array(5_000_000),
+    close:  new Float64Array(5_000_000),
     volume: new Float64Array(5_000_000),
   },
-  "5m": {
-    /* same structure, fewer rows */
-  },
+  '5m':  { /* same structure, fewer rows */ },
   // ...
 };
 ```
 
-`Float64Array` uses exactly 8 bytes per element with zero object overhead. Now your 5M × 10 timeframes × 5 fields = **~2 GB** actual memory. Very manageable.
+`Float64Array` uses exactly 8 bytes per element with zero object overhead. 5M x 10 timeframes x 5 fields = ~2 GB.
 
-### 2. Sliding window via index math, not array mutation
+### 2. Sliding window via index math
 
 Never `shift()` and `push()` on arrays. That's O(n) copying. Instead, maintain an index pointer:
 
 ```js
-let currentIndex = 5000; // start after initial lookback
-
-// The user's strategy sees:
-// close[currentIndex - 4999] through close[currentIndex]
-// That's just pointer arithmetic — zero data copying.
+let currentIndex = 5000;
 
 for (let i = 5000; i < totalMinutes; i++) {
   const window = {
     get(field, barsAgo) {
-      return timeframes["1m"][field][i - barsAgo];
+      return timeframes['1m'][field][i - barsAgo];
     },
   };
   userStrategy(window);
 }
 ```
 
-This makes each iteration essentially free — no memory allocation, no copying, no garbage collection pressure. You're just incrementing an integer.
+Each iteration is essentially free -- no memory allocation, no copying, no GC pressure. Just incrementing an integer.
 
-### 3. Bulk load from the database in large chunks
+### 3. Chunked database loading
 
-Don't load all 5M rows at once, and don't load one at a time. Load in chunks of **100k–500k rows** per timeframe using a streaming cursor or paginated queries:
+Load in chunks of 100k-500k rows per timeframe using a streaming cursor or paginated query. Write directly into pre-allocated `Float64Array` buffers as rows stream in.
 
 ```sql
-SELECT timestamp, open, high, low, close, volume
-FROM candles_1m
-ORDER BY timestamp
+SELECT ts, open, high, low, close, volume
+FROM ohlcv_1m
+WHERE symbol = 'ES'
+ORDER BY ts
 LIMIT 500000 OFFSET ?
 ```
 
-Or better, use a streaming query (e.g., `pg-cursor` for PostgreSQL) so you're not holding two copies in memory during the transfer. Write directly into your pre-allocated `Float64Array` buffers as rows stream in.
+### 4. Higher timeframe data access
 
-### 4. Pre-compute higher timeframe mappings
+The higher timeframe tables already store data at 1-minute resolution (rolling windows). Load them the same way as 1m data -- one row per minute, forward-filled values. This uses more memory but simplifies access patterns.
 
-This is a critical design decision. Your higher timeframe tables (5m, 15m, 1h, etc.) have one row per minute but the values only change at the boundary. You have two options:
+## Expected Performance
 
-- **Option A**: Store a mapping array `minuteToHTFIndex[i]` that maps each 1-minute index to the corresponding index in the higher timeframe's "completed bar" array. This is a simple integer lookup.
-- **Option B**: Just store the higher timeframe data at 1-minute resolution with forward-filled values (which it sounds like you're already doing). This uses more memory but simplifies access patterns enormously.
+| Operation | Speed |
+|-----------|-------|
+| Iterating 5M indices with simple math | ~50-100ms |
+| Accessing typed array elements per iteration | <1ns each |
+| User strategy with ~50 indicator lookups per bar | ~1-5 seconds for 5M bars |
+| Loading 500k rows from PostgreSQL | ~1-3 seconds |
+| Total memory for 5M x 10 TF x 5 fields | ~2 GB |
 
-Option B is simpler and the memory cost is acceptable with typed arrays.
+The bottleneck will be the user's strategy complexity, not data access.
 
-### 5. Benchmarks you can expect
-
-On a modern machine with Node.js:
-
-| Operation                                             | Speed                        |
-| ----------------------------------------------------- | ---------------------------- |
-| Iterating 5M indices with simple math                 | ~50–100ms                    |
-| Accessing typed array elements per iteration          | <1ns each                    |
-| User strategy with ~50 indicator lookups per bar      | ~1–5 seconds for full 5M run |
-| Loading 500k rows from PostgreSQL                     | ~1–3 seconds                 |
-| Total memory for 5M × 10 TF × 5 fields (Float64Array) | ~2 GB                        |
-
-The bottleneck will almost certainly be the **user's strategy complexity**, not data access.
-
-### 6. What I'd actually build
+## Data Flow
 
 ```
 ┌─────────────────────────────────────┐
-│           PostgreSQL / SQLite       │
-│  (candles_1m, candles_5m, etc.)     │
+│     PostgreSQL (ohlcv_1m, etc.)     │
 └──────────────┬──────────────────────┘
                │ Stream in chunks of 500k rows
                ▼
@@ -131,10 +105,6 @@ The bottleneck will almost certainly be the **user's strategy complexity**, not 
         Trade log / results
 ```
 
-### Key Takeaways
+## Reference Implementation
 
-- **Use `Float64Array`**, not JS objects. This alone cuts memory 3–5x and improves iteration speed dramatically due to cache locality.
-- **Never copy or mutate arrays** during the loop. Use index arithmetic for the sliding window.
-- **Load in large chunks** (100k–500k rows), not one-by-one and not all-at-once.
-- **PostgreSQL or even SQLite** is fine for this. The DB is just a loading mechanism — all real work happens in memory.
-- 5 million iterations with typed array access is trivially fast. The architecture you're describing is very achievable in Node.js.
+See [../data-indicators/rsi/](../data-indicators/rsi/) for a working implementation with `BacktestEngine.js` and `TimeframeBuffer.js` that implements this architecture with chunked streaming and 5,000-bar windows.

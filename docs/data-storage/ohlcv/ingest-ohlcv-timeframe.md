@@ -1,4 +1,6 @@
-# How it works
+# OHLCV Timeframe Ingestion
+
+> **Status:** Reference implementation in [ingest-ohlcv-timeframe.ts](./ingest-ohlcv-timeframe.ts). Not yet integrated into the production pipeline.
 
 Connects to 1-minute timeframe table.
 

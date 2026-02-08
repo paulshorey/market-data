@@ -2,7 +2,7 @@
 
 This documentation covers the order flow analysis strategy for detecting institutional activity, absorption, and momentum in futures markets using TBBO (Trade-By-Order) data.
 
-**Note:** For quick reference, see `AGENTS.md` in the project root. This folder contains detailed documentation.
+**Implementation status:** The order flow metrics described here are fully implemented in `src/lib/metrics/`. The pattern detection logic is in `scripts/detect-patterns.ts`.
 
 ## Overview
 
