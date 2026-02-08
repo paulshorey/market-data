@@ -1,12 +1,6 @@
 # Database Schema: Multi-Timeframe Rolling Windows
 
-## Current State
-
-The live pipeline writes to a single `"candles-1m"` table with 54 columns (OHLCV + 10 order flow metrics tracked as OHLC). See `src/lib/trade/db-writer.ts` for the full column list.
-
-The target architecture below is designed but not yet implemented.
-
-## Target Architecture: One Table Per Timeframe
+## One Table Per Timeframe
 
 All symbols share the same table, differentiated by a `symbol` column. ~10 tables total:
 

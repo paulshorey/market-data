@@ -1,7 +1,5 @@
 # Prisma Schema Reference
 
-> **Status:** Reference documentation. The production codebase uses raw SQL via `pg`, not Prisma. This documents the planned schema and serves as a reference for future Prisma integration if needed.
-
 ## Prisma Setup
 
 ### Installation

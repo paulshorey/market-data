@@ -1,7 +1,5 @@
 # Databento Live Streaming
 
-> **Implemented in:** `src/stream/tbbo-stream.ts` (production client with reconnection, JSON encoding, market hours detection)
-
 Reference implementation for connecting to the Databento Raw TCP API from Node.js.
 
 API docs: https://databento.com/docs/api-reference-live

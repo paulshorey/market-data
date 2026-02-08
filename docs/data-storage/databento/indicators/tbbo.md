@@ -1,7 +1,5 @@
 # TBBO Data Pipeline
 
-> **This describes the currently implemented live pipeline.** See `src/stream/` for the streaming client and `src/lib/metrics/` for metric calculations.
-
 The server streams TBBO (Trade-By-Order) data from Databento for futures contracts. Each trade includes price, volume, aggressor side, and order book snapshot. The system calculates order flow metrics and stores 1-minute candles in PostgreSQL.
 
 ## Database Schema

@@ -1,5 +1,7 @@
 # Documentation
 
+- [plan.md](./plan.md) -- Implementation checklist: what's built, what's next
+
 ## Data Storage
 
 How data is stored, ingested, and optimized in PostgreSQL.

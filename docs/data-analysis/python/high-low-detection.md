@@ -2,8 +2,6 @@
 
 Research on detecting swing highs and lows programmatically, for use in timing analysis and trajectory prediction.
 
-**Implementation status:** This is research/planning. No pivot detection is implemented in the codebase yet.
-
 ## The Problem
 
 Detecting if the current price is at a pivot high or low requires looking forward -- a pivot isn't confirmed until price moves away from it. The challenge is balancing early detection (useful for trading) against false positives (repainting).

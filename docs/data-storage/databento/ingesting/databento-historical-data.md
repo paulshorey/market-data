@@ -1,7 +1,5 @@
 # Importing Historical Data from Databento
 
-> **Implemented in:** `scripts/import-databento.ts` (OHLCV) and `scripts/historical-tbbo.ts` (tick data)
-
 Databento provides historical futures market data as downloadable files. Each file is manually downloaded, then processed by a Node script.
 
 Saved `ES` ticker history to file:
