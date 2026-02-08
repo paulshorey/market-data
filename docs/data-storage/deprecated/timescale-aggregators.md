@@ -1,3 +1,16 @@
+# ❌ Deprecated!
+
+Timescale DB will not be used. It is not as good for this codebase as a standard Postgres SQL DB, because:
+
+1. Its compression optimizes the code for read operations, but makes frequent writing very slow. We will be often re-writing the entire table with new values (updating indicator values when the calculation changes).
+2. It allows to easily aggregate a 1-minute table into any number of higher-timeframe minutes, but we will no longer be using this feature.
+
+Instead of using Timescale aggregators, we will be aggregating the tables manually into higher timeframes. By doing it manually, we'll be able to incrementally add a sliding-window rolling-window sampling to have a new higher order timeframe calculated every minute.
+
+For example, to create 60-minute candles calculated from the 1-minute table, the typical aggregator approach is to record 1 row for every 60 minutes of data. But our unique technical analysis requires a new 60-minute candle every 1-minute. Every 1-minute a higher-timeframe the table will close. This smooths out the analysis. Every calculated higher-timeframe candle will have 1-minute resolution. For a custom 181-minute or 239-minute candle, the process is just as easy as for a standard 30 or 60 minute candle. By doing it manually, we'll be able to pre-process and generate any size higher timeframe candles at 1-minute accuracy.
+
+---
+
 # Summary of my Timescale DB
 
 ## Hypertable with columnstore
@@ -109,6 +122,7 @@ SELECT compress_chunk('<chunk_name>');
 ```
 
 Alternatively, for large tables with many compressed chunks, consider:
+
 1. Creating a new table with the updated schema
 2. Migrating data in batches
 3. Renaming tables
