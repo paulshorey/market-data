@@ -1,6 +1,6 @@
 # Market Data Platform
 
-Multi-timeframe financial data pipeline for futures and crypto. Ingests live trade data, aggregates into candles with order flow metrics, and serves via REST API. The long-term goal is a backtesting platform where strategies can reference any timeframe (1-second to 1-day) at 1-minute resolution.
+Multi-timeframe financial data pipeline for futures and crypto. Ingests live trade data, aggregates into candles with order flow metrics, and serves via REST API. The long-term goal is a backtesting platform where strategies can reference any timeframe at 1-minute resolution.
 
 See [docs/plan.md](docs/plan.md) for what's built and what's next.
 
