@@ -1,16 +1,3 @@
-# ❌ Deprecated!
-
-Timescale DB will not be used. It is not as good for this codebase as a standard Postgres SQL DB, because:
-
-1. Its compression optimizes the code for read operations, but makes frequent writing very slow. We will be often re-writing the entire table with new values (updating indicator values when the calculation changes).
-2. It allows to easily aggregate a 1-minute table into any number of higher-timeframe minutes, but we will no longer be using this feature.
-
-Instead of using Timescale aggregators, we will be aggregating the tables manually into higher timeframes. By doing it manually, we'll be able to incrementally add a sliding-window rolling-window sampling to have a new higher order timeframe calculated every minute.
-
-For example, to create 60-minute candles calculated from the 1-minute table, the typical aggregator approach is to record 1 row for every 60 minutes of data. But our unique technical analysis requires a new 60-minute candle every 1-minute. Every 1-minute a higher-timeframe the table will close. This smooths out the analysis. Every calculated higher-timeframe candle will have 1-minute resolution. For a custom 181-minute or 239-minute candle, the process is just as easy as for a standard 30 or 60 minute candle. By doing it manually, we'll be able to pre-process and generate any size higher timeframe candles at 1-minute accuracy.
-
----
-
 # Summary of my Timescale DB
 
 ## Hypertable with columnstore
@@ -25,31 +12,26 @@ CREATE TABLE "candles-1m" (
     close DOUBLE PRECISION NOT NULL,
     volume DOUBLE PRECISION NOT NULL,
     symbol TEXT,
+    -- CVD OHLC (only metric with intra-candle OHLC tracking)
+    cvd_open DOUBLE PRECISION,
+    cvd_high DOUBLE PRECISION,
+    cvd_low DOUBLE PRECISION,
+    cvd_close DOUBLE PRECISION,
     -- Aggressive Order Flow (market orders)
     vd DOUBLE PRECISION,              -- Volume Delta: askVolume - bidVolume
-    cvd DOUBLE PRECISION,             -- Cumulative Volume Delta (running total)
     vd_ratio DOUBLE PRECISION,        -- VD / classified volume, bounded -1 to +1
     -- Passive Order Flow (limit orders)
     book_imbalance DOUBLE PRECISION,  -- (bidDepth - askDepth) / total, bounded -1 to +1
     -- Price Metrics
     price_pct DOUBLE PRECISION,       -- Price change in basis points (100 = 1%)
-    vwap DOUBLE PRECISION,            -- Volume-weighted average price
-    -- Liquidity Metrics
-    spread_bps DOUBLE PRECISION,      -- Average spread in basis points
     -- Activity Metrics
     trades INTEGER,                   -- Number of trades in candle
-    avg_trade_size DOUBLE PRECISION,  -- Average size per trade (volume/trades)
     -- Large Trade Detection
     max_trade_size DOUBLE PRECISION,  -- Largest single trade in candle
     big_trades INTEGER,               -- Count of trades >= large threshold
     big_volume DOUBLE PRECISION,      -- Total volume from large trades
     -- Absorption Detection
     divergence SMALLINT,              -- 1=bullish, -1=bearish, 0=none
-    evr DOUBLE PRECISION,             -- Effort vs Result absorption score
-    -- Composite Score
-    smp SMALLINT,                     -- Smart Money Pressure (-100 to +100)
-    -- Momentum
-    vd_strength DOUBLE PRECISION,     -- Current VD vs 5-min average (>1 = accelerating)
     PRIMARY KEY (ticker, time)
 );
 
@@ -70,9 +52,14 @@ SELECT add_compression_policy('candles-1m', INTERVAL '1 month');
 For existing deployments, add the order flow columns with the following statements:
 
 ```sql
+-- CVD OHLC
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd_open DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd_high DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd_low DOUBLE PRECISION;
+ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd_close DOUBLE PRECISION;
+
 -- Aggressive order flow
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd DOUBLE PRECISION;
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS cvd DOUBLE PRECISION;
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd_ratio DOUBLE PRECISION;
 
 -- Passive order flow
@@ -80,14 +67,9 @@ ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS book_imbalance DOUBLE PRECISIO
 
 -- Price metrics
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS price_pct DOUBLE PRECISION;
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vwap DOUBLE PRECISION;
-
--- Liquidity metrics
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS spread_bps DOUBLE PRECISION;
 
 -- Activity metrics
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS trades INTEGER;
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS avg_trade_size DOUBLE PRECISION;
 
 -- Large trade detection
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS max_trade_size DOUBLE PRECISION;
@@ -96,16 +78,6 @@ ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS big_volume DOUBLE PRECISION;
 
 -- Absorption detection
 ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS divergence SMALLINT;
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS evr DOUBLE PRECISION;
-
--- Composite score
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS smp SMALLINT;
-
--- Momentum
-ALTER TABLE "candles-1m" ADD COLUMN IF NOT EXISTS vd_strength DOUBLE PRECISION;
-
--- If migrating from old schema with momentum column, drop it
-ALTER TABLE "candles-1m" DROP COLUMN IF EXISTS momentum;
 ```
 
 **Note on compressed chunks:** If you have compressed chunks, you may need to decompress them before adding columns, then recompress:

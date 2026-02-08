@@ -64,7 +64,7 @@ const DATA_FILE = process.argv[3] || null;
 
 // Database connection
 const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL,
+  connectionString: process.env.TIMESCALE_URL,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -306,7 +306,7 @@ async function main(): Promise<void> {
     console.error("      PRIMARY KEY (time, ticker)");
     console.error("  );");
     console.error("");
-    console.error("  Ensure POSTGRES_URL is set in .env.");
+    console.error("  Ensure TIMESCALE_URL is set in .env.");
     process.exit(1);
   }
   console.log();

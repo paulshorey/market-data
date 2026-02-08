@@ -1,4 +1,7 @@
 #!/usr/bin/env npx tsx
+
+// IMPORTANT: NO LONGER DOING THIS. STICKING WITH TIMESCALE DB.
+
 /**
  * Migrate from Timescale DB to regular PostgreSQL
  *
@@ -6,7 +9,7 @@
  * Postgres (target) database, creating each table with PRIMARY KEY (time, ticker).
  *
  * Usage:
- *   TIMESCALE_DB_URL=postgresql://... POSTGRES_URL=postgresql://... npx tsx scripts/migrate-timescale-to-postgres.ts
+ *   TIMESCALE_URL=postgresql://... POSTGRES_URL=postgresql://... npx tsx scripts/migrate-timescale-to-postgres.ts
  *
  * Options:
  *   --dry-run  Print DDL and row counts only; do not create tables or copy data.
@@ -21,11 +24,11 @@ const FETCH_BATCH = 5000;
 /** Rows per INSERT into target (keeps param count under PostgreSQL limit) */
 const INSERT_BATCH = 500;
 
-const TIMESCALE_DB_URL = process.env.TIMESCALE_DB_URL;
+const TIMESCALE_URL = process.env.TIMESCALE_URL;
 const POSTGRES_URL = process.env.POSTGRES_URL;
 
-if (!TIMESCALE_DB_URL) {
-  console.error("Missing TIMESCALE_DB_URL (source Timescale DB connection string)");
+if (!TIMESCALE_URL) {
+  console.error("Missing TIMESCALE_URL (source Timescale DB connection string)");
   process.exit(1);
 }
 if (!POSTGRES_URL) {
@@ -34,7 +37,7 @@ if (!POSTGRES_URL) {
 }
 
 const sourcePool = new Pool({
-  connectionString: TIMESCALE_DB_URL,
+  connectionString: TIMESCALE_URL,
   max: 2,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
