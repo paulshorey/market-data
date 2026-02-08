@@ -1,6 +1,11 @@
-Based on the documentation I found, here's how to implement Databento's Raw TCP API in Node.js:
+# Databento
 
-## Overview
+A web service which provides live futures market data.
+
+API: https://databento.com/docs/api-reference-live?historical=http&live=http&reference=http
+TBBO data: https://databento.com/docs/schemas-and-data-formats/tbbo?historical=http&live=http&reference=http
+
+## How to implement Databento's Raw TCP API in Node.js:
 
 Databento doesn't have an official Node.js client, but their Raw API is language-agnostic. Here's a complete implementation:
 
@@ -142,7 +147,7 @@ class DatabentoLiveClient {
 async function main() {
   const client = new DatabentoLiveClient(
     process.env.DATABENTO_API_KEY,
-    "GLBX.MDP3" // CME Globex
+    "GLBX.MDP3", // CME Globex
   );
 
   try {

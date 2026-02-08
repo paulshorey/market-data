@@ -30,7 +30,8 @@ export function createCandleFromTrade(trade: NormalizedTrade): CandleState {
   const { price, size, isAsk, isBid, symbol, bidPrice, askPrice, bidSize, askSize, ticker } = trade;
 
   // Calculate spread and midpoint for this trade
-  const spread = askPrice > 0 && bidPrice > 0 ? askPrice - bidPrice : 0;
+  // Use Math.abs() because in crossed/inverted markets bid can exceed ask
+  const spread = askPrice > 0 && bidPrice > 0 ? Math.abs(askPrice - bidPrice) : 0;
   const midPrice = askPrice > 0 && bidPrice > 0 ? (askPrice + bidPrice) / 2 : price;
 
   // Check if this is a large trade
@@ -83,7 +84,8 @@ export function updateCandleWithTrade(candle: CandleState, trade: NormalizedTrad
   const { price, size, isAsk, isBid, symbol, bidPrice, askPrice, bidSize, askSize, ticker } = trade;
 
   // Calculate spread and midpoint for this trade
-  const spread = askPrice > 0 && bidPrice > 0 ? askPrice - bidPrice : 0;
+  // Use Math.abs() because in crossed/inverted markets bid can exceed ask
+  const spread = askPrice > 0 && bidPrice > 0 ? Math.abs(askPrice - bidPrice) : 0;
   const midPrice = askPrice > 0 && bidPrice > 0 ? (askPrice + bidPrice) / 2 : price;
 
   // Check if this is a large trade

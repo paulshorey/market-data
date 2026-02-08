@@ -16,22 +16,8 @@
  * Example:
  *   npx tsx --max-old-space-size=8192 scripts/import-databento.ts ES /Users/you/data/ES-full-history.txt
  *
- * PREREQUISITE: Create the table first:
- *
- *   CREATE TABLE "candles-1m" (
- *       time TIMESTAMPTZ NOT NULL,
- *       ticker TEXT NOT NULL,
- *       symbol TEXT NOT NULL,
- *       open DOUBLE PRECISION NOT NULL,
- *       high DOUBLE PRECISION NOT NULL,
- *       low DOUBLE PRECISION NOT NULL,
- *       close DOUBLE PRECISION NOT NULL,
- *       volume DOUBLE PRECISION NOT NULL,
- *       PRIMARY KEY (ticker, time)
- *   );
- *
- *   -- For TimescaleDB (optional but recommended):
- *   SELECT create_hypertable('candles-1m', by_range('time', INTERVAL '1 month'));
+ * PREREQUISITE: Create the table first (see scripts/migrate-timescale-to-postgres.ts
+ * or create manually with PRIMARY KEY (time, ticker)).
  */
 
 import fs from "fs";
@@ -78,7 +64,7 @@ const DATA_FILE = process.argv[3] || null;
 
 // Database connection
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.POSTGRES_URL,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -317,11 +303,10 @@ async function main(): Promise<void> {
     console.error("      low DOUBLE PRECISION NOT NULL,");
     console.error("      close DOUBLE PRECISION NOT NULL,");
     console.error("      volume DOUBLE PRECISION NOT NULL,");
-    console.error("      PRIMARY KEY (ticker, time)");
+    console.error("      PRIMARY KEY (time, ticker)");
     console.error("  );");
     console.error("");
-    console.error("  -- For TimescaleDB:");
-    console.error("  SELECT create_hypertable('candles-1m', by_range('time', INTERVAL '1 month'));");
+    console.error("  Ensure POSTGRES_URL is set in .env.");
     process.exit(1);
   }
   console.log();

@@ -1,0 +1,18 @@
+{
+  "name": "sliding-window-indicators",
+  "version": "1.0.0",
+  "description": "Calculate sliding window OHLCV and technical indicators for multiple timeframes, with high-performance backtesting",
+  "main": "src/indicators.js",
+  "scripts": {
+    "backfill": "node src/backfill.js",
+    "realtime": "node src/realtime.js",
+    "backtest": "node src/backtest/run.js",
+    "test": "node src/test.js"
+  },
+  "dependencies": {
+    "pg": "^8.11.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
