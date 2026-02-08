@@ -1,4 +1,4 @@
-# How it works
+# OHLCV Timeframe Ingestion
 
 Connects to 1-minute timeframe table.
 

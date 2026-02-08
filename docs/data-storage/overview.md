@@ -1,21 +1,23 @@
-# Storing financial data - by timeframe, for technical analysis strategy backtesting
+# Database Schema: Multi-Timeframe Rolling Windows
 
-## One table per timeframe
+## One Table Per Timeframe
 
-All symbols go in the same table, differentiated by a `symbol` column. You end up with ~10 tables total:
+All symbols share the same table, differentiated by a `symbol` column. ~10 tables total:
 
 ```
-ohlcv_1m      (source of truth)
-ohlcv_3m      (calculated)
-ohlcv_5m      (calculated)
-ohlcv_15m     (calculated)
-ohlcv_30m     (calculated)
-ohlcv_60m     (calculated)
-ohlcv_120m    (calculated)
-ohlcv_240m    (calculated)
-ohlcv_720m    (calculated)
-ohlcv_1440m   (calculated, aka 1D)
+ohlcv_1m      (source of truth, from live stream)
+ohlcv_3m      (rolling window, calculated from 1m)
+ohlcv_5m
+ohlcv_15m
+ohlcv_30m
+ohlcv_60m
+ohlcv_120m
+ohlcv_240m
+ohlcv_720m
+ohlcv_1440m   (1 day)
 ```
+
+Custom timeframes (7m, 13m, 19m, 29m, 59m, 109m, 181m) can also be added.
 
 ## Schema
 
@@ -37,13 +39,13 @@ CREATE TABLE ohlcv_1m (
 CREATE INDEX idx_ohlcv_1m_ts ON ohlcv_1m (ts DESC);
 ```
 
-**Calculated higher-timeframe tables (identical structure + minute_index + indicators):**
+**Higher-timeframe tables (same structure + minute_index + indicators):**
 
 ```sql
 CREATE TABLE ohlcv_60m (
     symbol        VARCHAR(20) NOT NULL,
     ts            TIMESTAMPTZ NOT NULL,
-    minute_index  SMALLINT NOT NULL,  -- cycles 1 to 60
+    minute_index  SMALLINT NOT NULL,  -- cycles 0 to 59
 
     -- Aggregated OHLCV (sliding window over past 60 1m candles)
     open          NUMERIC(18,8),
@@ -54,152 +56,113 @@ CREATE TABLE ohlcv_60m (
 
     -- Indicator values (nullable until calculated)
     rsi_14        NUMERIC(8,4),
-    rsi_21        NUMERIC(8,4),
-    macd_line     NUMERIC(18,8),
-    macd_signal   NUMERIC(18,8),
-    macd_hist     NUMERIC(18,8),
     ema_9         NUMERIC(18,8),
     ema_21        NUMERIC(18,8),
     sma_50        NUMERIC(18,8),
     sma_200       NUMERIC(18,8),
     atr_14        NUMERIC(18,8),
+    macd_line     NUMERIC(18,8),
+    macd_signal   NUMERIC(18,8),
+    macd_hist     NUMERIC(18,8),
     -- Add more as needed
 
     PRIMARY KEY (symbol, ts)
 );
 
--- Critical index for your minute_index query pattern
+-- Critical index for indicator lookups via minute_index
 CREATE INDEX idx_ohlcv_60m_indicator_lookup
     ON ohlcv_60m (symbol, minute_index, ts DESC);
 
--- Useful for time-range queries
 CREATE INDEX idx_ohlcv_60m_ts
     ON ohlcv_60m (ts DESC);
 ```
 
-Repeat for each timeframe, adjusting the table name and minute_index cycle length.
+Repeat for each timeframe, adjusting table name and minute_index cycle length.
 
-## Why this structure works
+## How minute_index Works
 
-**Query for RSI-14 calculation (fetching 14 prior closes):**
+For a 60-minute timeframe, `minute_index` cycles 0 through 59. Each value represents a "phase" of the hourly window:
+
+- minute_index=0: rows at 10:00, 11:00, 12:00... (each 60 mins apart)
+- minute_index=1: rows at 10:01, 11:01, 12:01... (each 60 mins apart)
+- minute_index=30: rows at 10:30, 11:30, 12:30... (each 60 mins apart)
+
+This means rows sharing the same minute_index form a series where consecutive entries are exactly one timeframe period apart -- exactly what indicators need.
+
+## Query Patterns
+
+**RSI-14 calculation (14 prior candles at same phase):**
 
 ```sql
 SELECT close
 FROM ohlcv_60m
-WHERE symbol = 'BTCUSDT'
+WHERE symbol = 'ES'
   AND minute_index = 31
 ORDER BY ts DESC
 LIMIT 14;
 ```
 
-This is an index-only scan on `(symbol, minute_index, ts DESC)`—essentially instant.
+This is an index-only scan on `(symbol, minute_index, ts DESC)`.
 
-**Query for charting (fetch recent candles for one symbol):**
+**Charting (recent candles for one symbol):**
 
 ```sql
 SELECT ts, open, high, low, close, volume, rsi_14, macd_line
 FROM ohlcv_60m
-WHERE symbol = 'BTCUSDT'
+WHERE symbol = 'ES'
   AND ts >= NOW() - INTERVAL '7 days'
 ORDER BY ts DESC;
 ```
 
-**Query for backtesting (fetch all data for one symbol in a date range):**
+**Backtesting (full data for a date range):**
 
 ```sql
 SELECT *
 FROM ohlcv_60m
-WHERE symbol = 'BTCUSDT'
+WHERE symbol = 'ES'
   AND ts BETWEEN '2024-01-01' AND '2024-06-01'
 ORDER BY ts;
 ```
 
-## Indicator columns: same table vs separate table
+## Design Decisions
 
-**Same table (recommended for your use case):**
+**Indicators in same table (not separate):**
+- Single query gets OHLCV + all indicators, no JOINs
+- Adding new indicators is just `ALTER TABLE ... ADD COLUMN`
+- Trade-off: schema changes require ALTER TABLE, but this is infrequent
 
-- Pros: Single query gets everything, simpler application code, no JOINs
-- Cons: Schema changes require ALTER TABLE when adding indicators
+**Partitioning (recommended at scale):**
+- Composite: LIST by symbol first, then RANGE by month
+- See [optimization.md](./optimization.md) for details
 
-**Separate indicators table:**
-
-- Pros: Flexible schema, can add indicators without touching OHLCV tables
-- Cons: Requires JOINs, more complex queries
-
-Since you likely have a known set of indicators and want fast single-query access for backtesting, keeping them in the same row makes sense. You can always add columns later:
-
-```sql
-ALTER TABLE ohlcv_60m ADD COLUMN bollinger_upper NUMERIC(18,8);
-```
-
-## Partitioning (optional but recommended at scale)
-
-For large datasets, partition by time:
-
-```sql
-CREATE TABLE ohlcv_60m (
-    symbol        VARCHAR(20) NOT NULL,
-    ts            TIMESTAMPTZ NOT NULL,
-    minute_index  SMALLINT NOT NULL,
-    open          NUMERIC(18,8),
-    high          NUMERIC(18,8),
-    low           NUMERIC(18,8),
-    close         NUMERIC(18,8),
-    volume        NUMERIC(24,8),
-    rsi_14        NUMERIC(8,4),
-    -- etc.
-    PRIMARY KEY (symbol, ts)
-) PARTITION BY RANGE (ts);
-
--- Create monthly partitions
-CREATE TABLE ohlcv_60m_2024_01 PARTITION OF ohlcv_60m
-    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
-CREATE TABLE ohlcv_60m_2024_02 PARTITION OF ohlcv_60m
-    FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
--- etc.
-```
-
-This keeps individual partitions smaller and allows fast drops of old data.
-
-## Summary of table count
-
-| What       | Count                           |
-| ---------- | ------------------------------- |
-| Timeframes | 10                              |
-| Tables     | 10 (one per timeframe)          |
-| Symbols    | Any number (rows in each table) |
-
-You do **not** need:
-
+**Not needed:**
 - Separate tables per symbol (symbols are rows, not tables)
 - Separate tables per symbol-timeframe combo
 
-## Visual summary
+## Visual Summary
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ ohlcv_1m (source of truth)                              │
+│ ohlcv_1m (source of truth)                               │
 │ ┌─────────┬─────────────────┬──────┬──────┬─────┬─────┐ │
 │ │ symbol  │ ts              │ open │ high │ low │close│ │
 │ ├─────────┼─────────────────┼──────┼──────┼─────┼─────┤ │
-│ │ BTCUSDT │ 2024-01-15 10:00│ ...  │ ...  │ ... │ ... │ │
-│ │ BTCUSDT │ 2024-01-15 10:01│ ...  │ ...  │ ... │ ... │ │
-│ │ ETHUSD  │ 2024-01-15 10:00│ ...  │ ...  │ ... │ ... │ │
-│ │ ETHUSD  │ 2024-01-15 10:01│ ...  │ ...  │ ... │ ... │ │
+│ │ ES      │ 2024-01-15 10:00│ ...  │ ...  │ ... │ ... │ │
+│ │ ES      │ 2024-01-15 10:01│ ...  │ ...  │ ... │ ... │ │
+│ │ NQ      │ 2024-01-15 10:00│ ...  │ ...  │ ... │ ... │ │
 │ └─────────┴─────────────────┴──────┴──────┴─────┴─────┘ │
 └─────────────────────────────────────────────────────────┘
                           │
-                          ▼ (backfill script calculates)
+                          ▼ (rolling-window pre-processing)
 ┌─────────────────────────────────────────────────────────┐
-│ ohlcv_60m (calculated sliding window)                   │
+│ ohlcv_60m (sliding window, one row per minute)           │
 │ ┌───────┬───────────┬─────┬──────┬──────┬─────┬───────┐ │
 │ │symbol │ ts        │ idx │ open │ high │ ... │ rsi_14│ │
 │ ├───────┼───────────┼─────┼──────┼──────┼─────┼───────┤ │
-│ │BTCUSDT│ 10:00     │  1  │ agg  │ agg  │ ... │ 54.2  │ │
-│ │BTCUSDT│ 10:01     │  2  │ agg  │ agg  │ ... │ 55.1  │ │
-│ │BTCUSDT│ 10:02     │  3  │ agg  │ agg  │ ... │ 53.8  │ │
-│ │ETHUSD │ 10:00     │  1  │ agg  │ agg  │ ... │ 48.7  │ │
-│ │ETHUSD │ 10:01     │  2  │ agg  │ agg  │ ... │ 49.2  │ │
+│ │ ES    │ 10:00     │  0  │ agg  │ agg  │ ... │ 54.2  │ │
+│ │ ES    │ 10:01     │  1  │ agg  │ agg  │ ... │ 55.1  │ │
+│ │ ES    │ 10:02     │  2  │ agg  │ agg  │ ... │ 53.8  │ │
+│ │ NQ    │ 10:00     │  0  │ agg  │ agg  │ ... │ 48.7  │ │
 │ └───────┴───────────┴─────┴──────┴──────┴─────┴───────┘ │
 └─────────────────────────────────────────────────────────┘
 ```

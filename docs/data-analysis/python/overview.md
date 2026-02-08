@@ -1,4 +1,4 @@
-# Technical Analysis Backtesting Libraries: A Comprehensive Pivot Detection Guide
+# Technical Analysis Libraries for Pivot Detection
 
 **Python with a combined stack of TA-Lib, scipy.signal, and VectorBT delivers the optimal solution** for building a custom backtesting tool with pivot prediction capabilities. TA-Lib provides unmatched cycle analysis through its Hilbert Transform suite, scipy.signal offers flexible peak detection algorithms, and VectorBT delivers the fastest vectorized backtesting with built-in pivot detection. This combination addresses all five requirements—pivot detection, timing analysis, trajectory analysis, and custom indicator development—while maintaining production-grade performance.
 

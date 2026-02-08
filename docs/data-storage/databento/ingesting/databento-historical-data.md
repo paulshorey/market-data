@@ -1,13 +1,6 @@
-# Databento
+# Importing Historical Data from Databento
 
-A web service which provides live and historical futures market data.
-
-Historical API: https://databento.com/docs/api-reference-historical?historical=http&live=http&reference=http
-
-## Historical data
-
-For historical data, I will download and save the data manually, one file per instrument.
-Then run a node script to process each downloaded data file.
+Databento provides historical futures market data as downloadable files. Each file is manually downloaded, then processed by a Node script.
 
 Saved `ES` ticker history to file:
 /absolute-path-in-computer/ES-20251230-full-history-OHLCV.txt

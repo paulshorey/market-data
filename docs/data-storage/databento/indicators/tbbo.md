@@ -1,6 +1,6 @@
-## System Overview
+# TBBO Data Pipeline
 
-This server streams TBBO (Trade-By-Order) data from Databento for futures contracts. Each trade includes price, volume, aggressor side, and order book snapshot. The system calculates order flow metrics and stores 1-minute candles in PostgreSQL.
+The server streams TBBO (Trade-By-Order) data from Databento for futures contracts. Each trade includes price, volume, aggressor side, and order book snapshot. The system calculates order flow metrics and stores 1-minute candles in PostgreSQL.
 
 ## Database Schema
 
@@ -44,7 +44,7 @@ This server streams TBBO (Trade-By-Order) data from Databento for futures contra
 | `big_trades`     | count >= 25 contracts     | integer      | Institutional activity             |
 | `big_volume`     | volume from big trades    | integer      | Institutional volume               |
 
-**See `docs/strategy/metrics-guide.md` for detailed explanations.**
+**See [metrics-guide.md](../../../data-backtesting/notes/metrics-guide.md) for detailed explanations.**
 
 ---
 
@@ -84,7 +84,7 @@ Run: `npx tsx scripts/detect-patterns.ts ES`
 | 3   | **Bullish Momentum**   | LONG   | `divergence = 0`, `vd_ratio > 0`, `price_pct > 0` |
 | 4   | **Bearish Momentum**   | SHORT  | `divergence = 0`, `vd_ratio < 0`, `price_pct < 0` |
 
-**See `docs/strategy/pattern-detection.md` for full SQL queries and interpretation.**
+**See [pattern-detection.md](../../../data-backtesting/notes/pattern-detection.md) for full SQL queries and interpretation.**
 
 ---
 
@@ -222,7 +222,7 @@ Implement rolling 5-minute history in `scripts/historical-tbbo.ts` to properly c
 
 ### Suggested Metrics
 
-Read `docs/strategy/suggested-metrics.md` about metrics to implement:
+See [suggested-metrics.md](../../../data-backtesting/notes/suggested-metrics.md) for metrics to implement:
 
 - `cvd_slope` - CVD rate of change
 - `volume_spike` - Volume vs recent average

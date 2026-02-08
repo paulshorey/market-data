@@ -1,35 +1,66 @@
-# Market database
+# Market Data Platform
 
-## Storage
+Multi-timeframe financial data pipeline for futures and crypto. Ingests live trade data, aggregates into candles with order flow metrics, and serves via REST API. The long-term goal is a backtesting platform where strategies can reference any timeframe (1-second to 1-day) at 1-minute resolution.
 
-Storing financial time series data for futures contracts and crypto, in multiple timeframes. This will be served to the client-side for charting and visualizing next to technical analysis and trading strategy backtesting results.
+See [docs/plan.md](docs/plan.md) for what's built and what's next.
 
-## Analysis
+## Core Innovation: Rolling-Window Sampling
 
-Each timeframe will have calculated indicator algorithm values, such as RSI, CVD, OBV, etc. This will be used for technial analysis and trading strategy development.
+Standard platforms calculate a 60-minute candle once per hour. This platform calculates it **every minute** using a sliding window over the previous 60 minutes. This means:
 
-## Back-testing
+- A 60m table has one row per minute (not per hour), each representing the trailing 60-minute window
+- `minute_index` cycles 0-59, identifying which phase of the timeframe the row represents
+- Indicators like RSI are calculated per minute_index independently (60 separate RSI calculators for a 60m timeframe)
+- Backtesting can evaluate any timeframe at any minute, not just at period boundaries
 
-The goal of this project is to create a unique platform for back-testing trading stragies. Unlike other products, this will allow the user to run their custom strategy on multiple timeframes from small (1-second) to large (1-day), at high resolution. The strategy must have confluence in all timeframes (trigger on 1-second, 1-minute, 1-hour, and any custom timeframes such as 59-minute or 181-minute).
+**Example**: To get RSI-14 on 60m data at 10:31 (minute_index=31), query 14 rows where `minute_index=31` ordered by timestamp DESC. Each row is 60 minutes apart (9:31, 8:31, 7:31...) -- exactly what the indicator needs.
 
-The indicator values will all be calculated at the lowest possible timeframe. This is the main differentiator. Other platforms calculate and save the 60-minute indicator values every 60-minutes, but this will calculate and save all higher timeframes at 1-minute resolution. Even the 1-day timeframe indicator and starategy values will be calculated and saved every 1-minute.
+```sql
+SELECT close FROM ohlcv_60m
+WHERE symbol = 'ES' AND minute_index = 31
+ORDER BY ts DESC LIMIT 14;
+```
 
-For 1-second (and sub-minute timeframes derived from 1-second, such as 5-seconds, 10-seconds, 30-seconds), the indicator values will be calculated every 1-second. That is a further advantage, letting the user write a very precise strategy, while still being able to reference large timeframes such as 1-hour to 1-day without waiting for them to finish.
+## Tech Stack
 
-## Rolling-window sampling pre-processing
+- **Runtime**: Node.js / TypeScript (strict mode)
+- **API**: Express
+- **Database**: PostgreSQL via `pg` (raw SQL, no ORM in production)
+- **Data feed**: Databento Raw TCP API (TBBO schema)
+- **Deployment**: Railway
 
-Our way to accomplish such multi-timeframe analysis at high resolution is a unique technique which no other service uses: a rolling-window / sliding-window sampling of each timeframe data table. Pre-process each instrument and generate the candles (open, high, low, close, aggregate volumen, and indicators such as the rsi_14, ema_100, etc) for every timeframe.
+## Database Conventions
 
-For example, to calculate high/low or RSI/EMA of a 180-minute timeframe, we'll always use 1-minute as the source of truth:
+- Table names: `ohlcv_{interval}m` (e.g., `ohlcv_60m`). One table per timeframe, all sharing the same schema.
+- Primary key: `(symbol, ts)`. All symbols share one table, differentiated by `symbol` column.
+- Critical index: `(symbol, minute_index, ts DESC)` for indicator lookups.
+- `minute_index` cycles 0 to N-1 for an N-minute timeframe.
+- Column names: snake_case in DB, camelCase in TypeScript.
+- Indicators stored in same row as OHLCV (no JOINs needed).
 
-Instead of calculating a 180-minute timeframe every 180 minutes, we will pre-process the table calculate a new candle value for it every 1-minute. We will remember the previous 180-minutes in memory at all times. Instead of having 1 closing candle value, it will have 180 closing candle values, one for every minute.
+See [docs/data-storage/overview.md](docs/data-storage/overview.md) for full schema, partitioning, and query patterns.
 
-For previous candles, we'll need to query the previous closing values for every unique minute in that 180-minute range. So if right now is minute_index 178, we'll select historical values with minute_index 178 (not calendar time, but the index of the current timeframe being analyzed).
+## Project Structure
 
-For this example, to calculate RSI 14 period, we'll need 14 rows from the `ohlcv_180m` where `minute_index=178`. This 178 is the current minute index in the current timeframe. So, `select from ohlcv_180m where symbol=$current_symbol and minute_index=$current_minute`.
+```
+src/
+  index.ts                  # Express server entry point
+  api/                      # REST endpoints (health, tables, historical candles)
+  lib/
+    db.ts                   # PostgreSQL connection pool
+    candles.ts              # Candle querying + timeframe selection
+    trade/                  # TBBO processing (aggregation, side detection, thresholds)
+    metrics/                # 10 order flow metric calculators (VD, CVD, EVR, SMP, etc.)
+  stream/                   # Databento live TCP client + aggregator
+scripts/                    # Data import and analysis tools
+docs/                       # Architecture docs, examples, research notes
+```
 
 ## Documentation
 
-Search the ./docs folder for more important context and example scripts.
+See [docs/index.md](docs/index.md) for the full map. Key sections:
 
-@docs/index.md
+- **data-storage/**: Database schema, partitioning, optimization, Databento ingestion
+- **data-indicators/**: Indicator calculation with rolling windows, RSI reference implementation
+- **data-backtesting/**: Backtesting architecture, order flow patterns, optimization
+- **data-analysis/**: Pivot detection research, Python analysis scripts

@@ -1,11 +1,11 @@
-# Databento
+# Databento Live Streaming
 
-A web service which provides live futures market data.
+Reference implementation for connecting to the Databento Raw TCP API from Node.js.
 
-API: https://databento.com/docs/api-reference-live?historical=http&live=http&reference=http
-TBBO data: https://databento.com/docs/schemas-and-data-formats/tbbo?historical=http&live=http&reference=http
+API docs: https://databento.com/docs/api-reference-live
+TBBO schema: https://databento.com/docs/schemas-and-data-formats/tbbo
 
-## How to implement Databento's Raw TCP API in Node.js:
+## Reference: Raw TCP API in Node.js
 
 Databento doesn't have an official Node.js client, but their Raw API is language-agnostic. Here's a complete implementation:
 

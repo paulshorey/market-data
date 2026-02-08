@@ -1,3 +1,5 @@
+# Prisma Schema Reference
+
 ## Prisma Setup
 
 ### Installation
