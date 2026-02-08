@@ -43,7 +43,7 @@ project/
 **.env**
 
 ```env
-DATABASE_URL="postgresql://postgres:password@localhost:5432/trading?schema=public"
+TIMESCALE_DB_URL="postgresql://postgres:password@localhost:5432/trading?schema=public"
 ```
 
 **prisma/schema.prisma**
@@ -56,7 +56,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url      = env("TIMESCALE_DB_URL")
 }
 
 // =============================================================================

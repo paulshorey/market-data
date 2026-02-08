@@ -1,8 +1,9 @@
 /**
- * OHLC (Open, High, Low, Close) tracking for metrics
+ * OHLC (Open, High, Low, Close) tracking for CVD
  *
- * Similar to price candles, we track the open/high/low/close of each metric
- * within a 1-minute window to capture intra-minute dynamics.
+ * Only CVD retains OHLC tracking because it's a running total that
+ * evolves meaningfully within a candle. All other metrics use their
+ * final (close) value only.
  *
  * - Open: First calculated value in the minute (only set once)
  * - High: Maximum value seen during the minute
@@ -54,104 +55,30 @@ export function updateMetricOHLC(ohlc: MetricOHLC, value: number): void {
 }
 
 /**
- * OHLC tracking for all order flow metrics
+ * OHLC tracking for CVD only.
  *
- * Each metric that changes during the minute has OHLC tracking:
- * - Direction: vd, cvd, vdRatio
- * - Confirmation: bookImbalance
- * - Price: vwap, spreadBps, pricePct
- * - Activity: avgTradeSize
- * - Absorption: evr
- * - Composite: smp
- *
- * Note: Some metrics like trades, bigTrades, bigVolume, maxTradeSize are
- * cumulative/max by nature and don't need OHLC tracking. divergence is
- * categorical (-1, 0, 1) and vdStrength requires history, so they use
- * simpler tracking.
+ * Other metrics (vd, vdRatio, bookImbalance, pricePct) are stored
+ * as single close values calculated at flush time from the candle's
+ * raw aggregation state. divergence, trades, big_trades, big_volume,
+ * max_trade_size are also single values.
  */
 export interface MetricsOHLC {
-  // Direction metrics
-  vd: MetricOHLC;
+  /** Cumulative Volume Delta OHLC */
   cvd: MetricOHLC;
-  vdRatio: MetricOHLC;
-
-  // Confirmation metrics
-  bookImbalance: MetricOHLC;
-
-  // Price/liquidity metrics
-  vwap: MetricOHLC;
-  spreadBps: MetricOHLC;
-  pricePct: MetricOHLC;
-
-  // Activity metrics
-  avgTradeSize: MetricOHLC;
-
-  // Absorption metrics
-  evr: MetricOHLC;
-
-  // Composite metrics
-  smp: MetricOHLC;
-
-  // These don't need OHLC (cumulative or special)
-  // trades, bigTrades, bigVolume - cumulative counts
-  // maxTradeSize - already tracking max
-  // divergence - categorical (-1, 0, 1)
-  // vdStrength - requires rolling history
 }
 
 /**
- * Initialize all metric OHLC values from current metric values
+ * Initialize CVD OHLC with the first value
  */
-export function initAllMetricsOHLC(
-  vd: number,
-  cvd: number,
-  vdRatio: number,
-  bookImbalance: number,
-  vwap: number,
-  spreadBps: number,
-  pricePct: number,
-  avgTradeSize: number,
-  evr: number,
-  smp: number
-): MetricsOHLC {
+export function initCvdOHLC(cvd: number): MetricsOHLC {
   return {
-    vd: initMetricOHLC(vd),
     cvd: initMetricOHLC(cvd),
-    vdRatio: initMetricOHLC(vdRatio),
-    bookImbalance: initMetricOHLC(bookImbalance),
-    vwap: initMetricOHLC(vwap),
-    spreadBps: initMetricOHLC(spreadBps),
-    pricePct: initMetricOHLC(pricePct),
-    avgTradeSize: initMetricOHLC(avgTradeSize),
-    evr: initMetricOHLC(evr),
-    smp: initMetricOHLC(smp),
   };
 }
 
 /**
- * Update all metric OHLC values with new metric values
+ * Update CVD OHLC with a new value
  */
-export function updateAllMetricsOHLC(
-  ohlc: MetricsOHLC,
-  vd: number,
-  cvd: number,
-  vdRatio: number,
-  bookImbalance: number,
-  vwap: number,
-  spreadBps: number,
-  pricePct: number,
-  avgTradeSize: number,
-  evr: number,
-  smp: number
-): void {
-  updateMetricOHLC(ohlc.vd, vd);
+export function updateCvdOHLC(ohlc: MetricsOHLC, cvd: number): void {
   updateMetricOHLC(ohlc.cvd, cvd);
-  updateMetricOHLC(ohlc.vdRatio, vdRatio);
-  updateMetricOHLC(ohlc.bookImbalance, bookImbalance);
-  updateMetricOHLC(ohlc.vwap, vwap);
-  updateMetricOHLC(ohlc.spreadBps, spreadBps);
-  updateMetricOHLC(ohlc.pricePct, pricePct);
-  updateMetricOHLC(ohlc.avgTradeSize, avgTradeSize);
-  updateMetricOHLC(ohlc.evr, evr);
-  updateMetricOHLC(ohlc.smp, smp);
 }

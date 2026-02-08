@@ -38,7 +38,7 @@ export {
   createCandleFromTrade,
   updateCandleWithTrade,
   addTradeToCandle,
-  updateCandleMetricsOHLC,
+  updateCandleCvdOHLC,
   addTradeAndUpdateMetrics,
 } from "./candle-aggregation.js";
 

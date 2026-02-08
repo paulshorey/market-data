@@ -1,5 +1,5 @@
 /**
- * Absorption Metrics: divergence, evr
+ * Absorption Metrics: divergence
  *
  * Flags hidden accumulation/distribution by detecting when aggressive
  * volume doesn't move price as expected.
@@ -54,43 +54,7 @@ export function calculateDivergence(pricePct: number, vdRatio: number): -1 | 0 |
   return 0;
 }
 
-/**
- * Calculate Effort vs Result (EVR) absorption score
- *
- * EVR measures the efficiency of aggressive volume in moving price.
- * When effort (aggressive volume) doesn't produce result (price movement),
- * it indicates absorption - large limit orders absorbing market orders.
- *
- * Formula: EVR = pricePct / (|vdRatio| * 100)
- *
- * Interpretation:
- * - |EVR| > 1.0: Very efficient - price moved more than expected for the imbalance
- * - |EVR| 0.5-1.0: Normal efficiency - price followed imbalance proportionally
- * - |EVR| < 0.5: Low efficiency - possible absorption
- * - |EVR| ≈ 0 with high |vdRatio|: Strong absorption signal
- * - EVR = null: No meaningful imbalance to measure (vdRatio < 5%)
- *
- * EVR sign indicates price direction (positive = up, negative = down).
- * Compare with vdRatio sign to detect divergence:
- * - Same sign: Price followed aggressor (normal)
- * - Opposite sign: Price moved against aggressor (absorption/divergence)
- *
- * Combined analysis:
- * - Low |EVR| + divergence flag: Strong absorption (accumulation/distribution)
- * - Low |EVR| + no divergence: Price stalled (consolidation, range-bound)
- * - High |EVR| + no divergence: Clean trend move
- *
- * @param pricePct - Normalized price change (basis points)
- * @param vdRatio - VD ratio (-1 to +1)
- * @returns EVR score, or null if vdRatio < 5% (no meaningful imbalance)
- */
-export function calculateEvr(pricePct: number, vdRatio: number): number | null {
-  // If VD ratio is very small (< 5% imbalance), EVR is not meaningful
-  // Return null to distinguish from "EVR = 0" which means absorption
-  const absVdRatio = Math.abs(vdRatio);
-  if (absVdRatio < 0.05) return null;
-
-  // Scale vdRatio to percentage (0-100) for more intuitive EVR values
-  // A 50% VD ratio with 10bp price move = EVR of 0.2
-  return pricePct / (absVdRatio * 100);
-}
+// EVR (Effort vs Result) has been removed as a stored column.
+// It can be derived at query time from price_pct and vd_ratio:
+//   EVR = price_pct / (|vd_ratio| * 100)
+// This avoids storing a column with numerical instability near zero.

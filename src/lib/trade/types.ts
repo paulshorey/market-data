@@ -95,11 +95,6 @@ export interface CandleState {
    */
   currentCvd?: number;
 
-  /**
-   * VD strength for this candle (from momentum tracker).
-   * Set by the aggregator which has access to rolling history.
-   */
-  vdStrength?: number;
 }
 
 /**
@@ -149,6 +144,4 @@ export interface NormalizedTrade {
 export interface MetricCalculationContext {
   /** Current CVD value before this candle's VD is added */
   baseCvd: number;
-  /** VD strength from momentum tracker (default 1 if no history) */
-  vdStrength: number;
 }

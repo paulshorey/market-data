@@ -35,20 +35,14 @@ export {
 // Re-exports from Metrics Library
 // ============================================================================
 
-export type { OrderFlowMetrics, OrderFlowInput, SmpInput } from "../lib/metrics/types.js";
+export type { OrderFlowMetrics, OrderFlowInput } from "../lib/metrics/types.js";
 
 export { calculateVd, calculateVdRatio } from "../lib/metrics/direction.js";
 
 export { calculateBookImbalance } from "../lib/metrics/book-imbalance.js";
 
-export { calculatePricePct, calculateVwap, calculateSpreadBps } from "../lib/metrics/price.js";
+export { calculatePricePct } from "../lib/metrics/price.js";
 
-export { calculateAvgTradeSize } from "../lib/metrics/activity.js";
-
-export { calculateDivergence, calculateEvr } from "../lib/metrics/absorption.js";
-
-export { MomentumTracker, MOMENTUM_WINDOW } from "../lib/metrics/momentum.js";
-
-export { calculateSmp } from "../lib/metrics/composite.js";
+export { calculateDivergence } from "../lib/metrics/absorption.js";
 
 export { calculateOrderFlowMetrics } from "../lib/metrics/calculate-all.js";

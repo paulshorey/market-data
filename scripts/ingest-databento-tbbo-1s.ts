@@ -1,20 +1,23 @@
 #!/usr/bin/env npx tsx
 /**
- * Historical TBBO Data Processor
+ * Historical TBBO Data Processor (1-Second Resolution)
  *
  * Processes historical TBBO trade data from JSONL files and writes
- * 1-minute OHLCV candles with VD and CVD to the database.
+ * 1-second OHLCV candles with VD and CVD to the database.
  *
  * Usage:
- *   npx tsx scripts/historical-tbbo.ts <file1.json> [file2.json] ...
- *   npx tsx scripts/historical-tbbo.ts ./data/*.json
+ *   npx tsx scripts/ingest-databento-tbbo-1s.ts <file1.json> [file2.json] ...
+ *   npx tsx scripts/ingest-databento-tbbo-1s.ts ./data/*.json
  *
  * Features:
  * - Processes JSONL files (one JSON object per line)
+ * - Aggregates trades into 1-second buckets (vs 1-minute in ingest-databento-tbbo-1m)
  * - Calculates Volume Delta (VD) and Cumulative Volume Delta (CVD)
  * - Calculates all order flow metrics with OHLC tracking
  * - Resumable: loads last CVD from database on startup
  * - Batch writes for performance
+ *
+ * Requires table "candles-1s" with same schema as "candles-1m".
  */
 
 import "dotenv/config";
@@ -23,23 +26,10 @@ import { createInterface } from "readline";
 import { pool } from "../src/lib/db.js";
 
 // Import types from trade library
-import type {
-  CandleState,
-  CandleForDb,
-  NormalizedTrade,
-  MetricCalculationContext,
-  CvdContext,
-} from "../src/lib/trade/index.js";
+import type { CandleState, CandleForDb, NormalizedTrade, MetricCalculationContext, CvdContext } from "../src/lib/trade/index.js";
 
-// Import trade processing utilities
-import {
-  extractTicker,
-  toMinuteBucket,
-  determineTradeSide,
-  addTradeAndUpdateMetrics,
-  buildCandleInsertQuery,
-  buildCandleInsertParams,
-} from "../src/lib/trade/index.js";
+// Import trade processing utilities (excluding toMinuteBucket - we use toSecondBucket)
+import { extractTicker, determineTradeSide, addTradeAndUpdateMetrics, buildCandleInsertQuery, buildCandleInsertParams } from "../src/lib/trade/index.js";
 
 // ============================================================================
 // Types
@@ -90,6 +80,38 @@ interface HistoricalTbboJson {
 }
 
 // ============================================================================
+// Second bucket utility
+// ============================================================================
+
+/**
+ * Parse any timestamp format to 1-second bucket (truncate milliseconds)
+ * Supports:
+ * - ISO string: "2025-12-01T00:00:00.003176304Z"
+ * - Nanosecond epoch string: "1768275460711927889"
+ * - Nanosecond epoch number: 1768275460711927889
+ *
+ * @param timestamp - Timestamp in any supported format
+ * @returns ISO string for the start of the second
+ */
+function toSecondBucket(timestamp: string | number): string {
+  let date: Date;
+
+  if (typeof timestamp === "number") {
+    // Nanosecond epoch number - convert to milliseconds
+    date = new Date(Math.floor(timestamp / 1_000_000));
+  } else if (typeof timestamp === "string" && (timestamp.includes("T") || timestamp.includes("-"))) {
+    // ISO string format
+    date = new Date(timestamp);
+  } else {
+    // Nanosecond epoch string - convert to milliseconds
+    date = new Date(Math.floor(parseInt(String(timestamp), 10) / 1_000_000));
+  }
+
+  date.setMilliseconds(0);
+  return date.toISOString();
+}
+
+// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -130,7 +152,7 @@ async function loadCvdFromDatabase(): Promise<void> {
   try {
     const result = await pool.query(`
       SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-      FROM "candles-1m"
+      FROM "candles-1s"
       WHERE cvd_close IS NOT NULL
       ORDER BY ticker, time DESC
     `);
@@ -184,35 +206,18 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
     // Parse bid/ask prices - check levels array first, then top-level fields
     const bidPxRaw = level?.bid_px ?? json.bid_px;
     const askPxRaw = level?.ask_px ?? json.ask_px;
-    const bidPrice =
-      json.bidPrice ??
-      (bidPxRaw
-        ? typeof bidPxRaw === "number"
-          ? bidPxRaw
-          : parseFloat(bidPxRaw)
-        : 0);
-    const askPrice =
-      json.askPrice ??
-      (askPxRaw
-        ? typeof askPxRaw === "number"
-          ? askPxRaw
-          : parseFloat(askPxRaw)
-        : 0);
+    const bidPrice = json.bidPrice ?? (bidPxRaw ? (typeof bidPxRaw === "number" ? bidPxRaw : parseFloat(String(bidPxRaw))) : 0);
+    const askPrice = json.askPrice ?? (askPxRaw ? (typeof askPxRaw === "number" ? askPxRaw : parseFloat(String(askPxRaw))) : 0);
 
     // Parse bid/ask sizes - check levels array first, then top-level fields
     const bidSz = level?.bid_sz ?? json.bid_sz ?? 0;
     const askSz = level?.ask_sz ?? json.ask_sz ?? 0;
 
     const ticker = extractTicker(json.symbol);
-    const minuteBucket = toMinuteBucket(timestamp);
+    const secondBucket = toSecondBucket(timestamp);
 
     // Determine trade side using Lee-Ready algorithm as fallback
-    const { isAsk, isBid } = determineTradeSide(
-      json.side || "",
-      price,
-      bidPrice || 0,
-      askPrice || 0
-    );
+    const { isAsk, isBid } = determineTradeSide(json.side || "", price, bidPrice || 0, askPrice || 0);
 
     // Track unknown side trades
     if (!isAsk && !isBid) {
@@ -221,7 +226,7 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
 
     return {
       ticker,
-      minuteBucket,
+      minuteBucket: secondBucket, // reusing field for second bucket ISO string
       price,
       size: json.size || 0,
       isAsk,
@@ -251,7 +256,6 @@ function addTrade(trade: NormalizedTrade): void {
   const baseCvd = cvdByTicker.get(trade.ticker) || 0;
   const context: MetricCalculationContext = {
     baseCvd,
-    vdStrength: 1, // No rolling history for historical data
   };
 
   // Use shared candle aggregation with metrics OHLC tracking
@@ -311,7 +315,7 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
   };
 
   const { values, placeholders } = buildCandleInsertParams(batch, cvdContext);
-  const query = buildCandleInsertQuery(placeholders);
+  const query = buildCandleInsertQuery(placeholders).replace(/candles-1m/g, "candles-1s");
 
   await pool.query(query, values);
   stats.candlesWritten += batch.length;
@@ -351,7 +355,7 @@ async function processFile(filePath: string): Promise<void> {
       console.log(
         `   📊 ${stats.linesProcessed.toLocaleString()} lines, ` +
           `${stats.tradesProcessed.toLocaleString()} trades, ` +
-          `${candles.size.toLocaleString()} pending candles`
+          `${candles.size.toLocaleString()} pending candles`,
       );
     }
   }
@@ -371,13 +375,13 @@ async function main(): Promise<void> {
   const files = process.argv.slice(2);
 
   if (files.length === 0) {
-    console.error("Usage: npx tsx scripts/historical-tbbo.ts <file1.json> [file2.json] ...");
-    console.error("       npx tsx scripts/historical-tbbo.ts ./data/*.json");
+    console.error("Usage: npx tsx scripts/ingest-databento-tbbo-1s.ts <file1.json> [file2.json] ...");
+    console.error("       npx tsx scripts/ingest-databento-tbbo-1s.ts ./data/*.json");
     process.exit(1);
   }
 
   console.log("═".repeat(60));
-  console.log("📊 Historical TBBO Processor (with OHLC metrics)");
+  console.log("📊 Historical TBBO Processor (1-second candles + OHLC metrics)");
   console.log("═".repeat(60));
   console.log(`   Files to process: ${files.length}`);
   console.log("");

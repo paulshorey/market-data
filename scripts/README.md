@@ -1,6 +1,7 @@
-## Example of a JSONL file from Databento:
+## TBBO data
 
-A file like this will be processed by historical-tbbo.ts script. The real file will be much much larger, will need to be read in chunks!
+A file like this will be processed by historical-tbbo.ts script.
+The real file will be very very large. It will need to be read in chunks.
 Notice this is not a valid JSON file. It is a text list of JSON objects.
 
 ```

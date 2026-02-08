@@ -1,8 +1,9 @@
 # Implementation Plan
 
-What's been built, and what's next.
+1. 1-min OHLCV table
+2.
 
-## Done
+## Done:
 
 ### Live Data Pipeline
 
@@ -52,7 +53,7 @@ What's been built, and what's next.
 
 - [x] Done in a different app. This app is strictly for managing the data.
 
-## Next
+## To do:
 
 ### Multi-Timeframe Tables
 

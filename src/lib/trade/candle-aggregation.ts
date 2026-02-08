@@ -3,22 +3,15 @@
  *
  * Shared logic for aggregating trades into OHLCV candles with order flow metrics.
  * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
+ *
+ * Only CVD retains OHLC tracking (it's a running total that evolves within a candle).
+ * All other metrics are calculated once at flush time from the candle's raw state.
  */
 
 import type { CandleState, NormalizedTrade, MetricCalculationContext } from "./types.js";
 import { getLargeTradeThreshold } from "./thresholds.js";
-import {
-  calculateVd,
-  calculateVdRatio,
-  calculateBookImbalance,
-  calculateVwap,
-  calculateSpreadBps,
-  calculatePricePct,
-  calculateAvgTradeSize,
-  calculateEvr,
-  calculateSmp,
-} from "../metrics/index.js";
-import { initAllMetricsOHLC, updateAllMetricsOHLC } from "../metrics/ohlc.js";
+import { calculateVd } from "../metrics/index.js";
+import { initCvdOHLC, updateCvdOHLC } from "../metrics/ohlc.js";
 
 /**
  * Create a new empty candle state from a trade
@@ -55,11 +48,11 @@ export function createCandleFromTrade(trade: NormalizedTrade): CandleState {
     sumBidDepth: bidSize || 0,
     sumAskDepth: askSize || 0,
 
-    // Spread tracking
+    // Spread tracking (kept in raw state for potential future use)
     sumSpread: spread,
     sumMidPrice: midPrice,
 
-    // VWAP tracking
+    // VWAP tracking (kept in raw state for potential future use)
     sumPriceVolume: price * size,
 
     // Large trade detection
@@ -70,7 +63,7 @@ export function createCandleFromTrade(trade: NormalizedTrade): CandleState {
     symbol,
     tradeCount: 1,
 
-    // metricsOHLC will be initialized by updateCandleMetricsOHLC
+    // metricsOHLC will be initialized by updateCandleCvdOHLC
   };
 }
 
@@ -146,132 +139,47 @@ export function addTradeToCandle(
 }
 
 /**
- * Calculate current metric values from candle state
- */
-function calculateCurrentMetrics(
-  candle: CandleState,
-  baseCvd: number,
-  vdStrength: number
-): {
-  vd: number;
-  cvd: number;
-  vdRatio: number;
-  bookImbalance: number;
-  vwap: number;
-  spreadBps: number;
-  pricePct: number;
-  avgTradeSize: number;
-  evr: number;
-  smp: number;
-} {
-  // Calculate base metrics
-  const vd = calculateVd(candle.askVolume, candle.bidVolume);
-  const cvd = baseCvd + vd;
-  const vdRatio = calculateVdRatio(candle.askVolume, candle.bidVolume);
-  const bookImbalance = calculateBookImbalance(candle.sumBidDepth, candle.sumAskDepth);
-  const vwap = calculateVwap(candle.sumPriceVolume, candle.volume);
-  const spreadBps = calculateSpreadBps(candle.sumSpread, candle.sumMidPrice, candle.tradeCount);
-  const pricePct = calculatePricePct(candle.open, candle.close);
-  const avgTradeSize = calculateAvgTradeSize(candle.volume, candle.tradeCount);
-
-  // Calculate EVR (may be null, convert to 0 for OHLC tracking)
-  const evrRaw = calculateEvr(pricePct, vdRatio);
-  const evr = evrRaw ?? 0;
-
-  // Calculate SMP
-  const smp = calculateSmp({
-    vdRatio,
-    bookImbalance,
-    bigVolume: candle.largeTradeVolume,
-    volume: candle.volume,
-    evr: evrRaw,
-    divergence: 0, // Divergence is calculated at the end
-    spreadBps,
-    vdStrength,
-  });
-
-  return {
-    vd,
-    cvd,
-    vdRatio,
-    bookImbalance,
-    vwap,
-    spreadBps,
-    pricePct,
-    avgTradeSize,
-    evr,
-    smp,
-  };
-}
-
-/**
- * Update the metrics OHLC in a candle after a trade has been added.
+ * Update CVD OHLC tracking after a trade has been added.
  *
- * This should be called after each trade to track how metrics evolved
- * throughout the minute. The first call initializes the OHLC (setting open),
- * subsequent calls update high/low/close.
+ * Only CVD needs intra-minute OHLC tracking because it's a running total
+ * that evolves trade-by-trade. All other metrics use their final values
+ * calculated at flush time.
  *
  * @param candle - The candle state (must have trade data already added)
- * @param context - Context with base CVD and vdStrength from the aggregator
+ * @param context - Context with base CVD from the aggregator
  */
-export function updateCandleMetricsOHLC(
+export function updateCandleCvdOHLC(
   candle: CandleState,
   context: MetricCalculationContext
 ): void {
-  const { baseCvd, vdStrength } = context;
+  const { baseCvd } = context;
 
-  // Calculate current metric values
-  const metrics = calculateCurrentMetrics(candle, baseCvd, vdStrength);
+  // Calculate current CVD
+  const vd = calculateVd(candle.askVolume, candle.bidVolume);
+  const cvd = baseCvd + vd;
 
-  // Store current CVD and vdStrength in candle for later use
-  candle.currentCvd = metrics.cvd;
-  candle.vdStrength = vdStrength;
+  // Store current CVD in candle for later use
+  candle.currentCvd = cvd;
 
-  // Initialize or update metrics OHLC
+  // Initialize or update CVD OHLC
   if (!candle.metricsOHLC) {
-    // First trade - initialize all OHLC with current values (sets open)
-    candle.metricsOHLC = initAllMetricsOHLC(
-      metrics.vd,
-      metrics.cvd,
-      metrics.vdRatio,
-      metrics.bookImbalance,
-      metrics.vwap,
-      metrics.spreadBps,
-      metrics.pricePct,
-      metrics.avgTradeSize,
-      metrics.evr,
-      metrics.smp
-    );
+    candle.metricsOHLC = initCvdOHLC(cvd);
   } else {
-    // Subsequent trades - update high/low/close
-    updateAllMetricsOHLC(
-      candle.metricsOHLC,
-      metrics.vd,
-      metrics.cvd,
-      metrics.vdRatio,
-      metrics.bookImbalance,
-      metrics.vwap,
-      metrics.spreadBps,
-      metrics.pricePct,
-      metrics.avgTradeSize,
-      metrics.evr,
-      metrics.smp
-    );
+    updateCvdOHLC(candle.metricsOHLC, cvd);
   }
 }
 
 /**
- * Add a trade to a candle map and update metrics OHLC
+ * Add a trade to a candle map and update CVD OHLC tracking
  *
  * This is the complete function that:
  * 1. Adds the trade to the candle (or creates a new candle)
- * 2. Calculates current metrics
- * 3. Updates the metrics OHLC tracking
+ * 2. Updates the CVD OHLC tracking
  *
  * @param candles - Map of key -> CandleState
  * @param key - The key for this candle (typically "ticker|minuteBucket")
  * @param trade - The normalized trade to add
- * @param context - Context with base CVD and vdStrength from the aggregator
+ * @param context - Context with base CVD from the aggregator
  */
 export function addTradeAndUpdateMetrics(
   candles: Map<string, CandleState>,
@@ -282,7 +190,7 @@ export function addTradeAndUpdateMetrics(
   // Add the trade to the candle
   addTradeToCandle(candles, key, trade);
 
-  // Update metrics OHLC
+  // Update CVD OHLC
   const candle = candles.get(key)!;
-  updateCandleMetricsOHLC(candle, context);
+  updateCandleCvdOHLC(candle, context);
 }

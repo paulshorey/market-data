@@ -44,7 +44,7 @@ import {
 } from "../lib/trade/index.js";
 
 // Import metrics calculations
-import { calculateVd, MomentumTracker } from "../lib/metrics/index.js";
+import { calculateVd } from "../lib/metrics/index.js";
 
 // Re-export TbboRecord for consumers that import from this file
 export type { TbboRecord } from "../lib/trade/index.js";
@@ -66,9 +66,6 @@ export class TbboAggregator {
 
   /** Cumulative Volume Delta per ticker - persists across minutes */
   private cvdByTicker: Map<string, number> = new Map();
-
-  /** Momentum tracker for VD strength calculations */
-  private momentumTracker = new MomentumTracker();
 
   /** Whether initialize() has been called */
   private initialized = false;
@@ -194,12 +191,9 @@ export class TbboAggregator {
 
     // Get context for metric calculation
     const baseCvd = this.cvdByTicker.get(ticker) || 0;
-    const currentVd = this.getCurrentVdForTicker(key);
-    const { vdStrength } = this.momentumTracker.getVdMomentum(ticker, currentVd);
 
     const context: MetricCalculationContext = {
       baseCvd,
-      vdStrength,
     };
 
     // Add trade and update metrics OHLC
@@ -209,15 +203,6 @@ export class TbboAggregator {
     this.maybeLogStatus();
 
     return true;
-  }
-
-  /**
-   * Get current VD for a ticker's candle (for momentum calculation)
-   */
-  private getCurrentVdForTicker(key: string): number {
-    const candle = this.candles.get(key);
-    if (!candle) return 0;
-    return calculateVd(candle.askVolume, candle.bidVolume);
   }
 
   // =========================================================================
@@ -365,9 +350,6 @@ export class TbboAggregator {
       // Update CVD
       const currentCvd = this.cvdByTicker.get(ticker) || 0;
       this.cvdByTicker.set(ticker, currentCvd + vd);
-
-      // Update VD history for momentum calculations
-      this.momentumTracker.updateVdHistory(ticker, vd);
 
       this.candles.delete(key);
     }
