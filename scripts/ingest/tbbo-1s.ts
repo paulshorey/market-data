@@ -148,6 +148,9 @@ const candles: Map<string, CandleState> = new Map();
 /** Cumulative Volume Delta per ticker */
 const cvdByTicker: Map<string, number> = new Map();
 
+/** Track the last candle key per ticker so we can carry forward CVD between second buckets */
+const lastKeyByTicker: Map<string, string> = new Map();
+
 /** Front-month contract tracker (5-minute rolling volume window) */
 const tracker = new FrontMonthTracker();
 
@@ -290,6 +293,19 @@ function addTrade(trade: NormalizedTrade): void {
 
   // Key by ticker|secondBucket for the stitched continuous series
   const key = `${ticker}|${trade.minuteBucket}`;
+
+  // When moving to a new second bucket for this ticker, carry forward
+  // CVD from the previous candle so it accumulates correctly across candles.
+  // Without this, every candle gets the same baseCvd (only updated at flush),
+  // making CVD = baseCvd + this_candle_vd instead of a true running total.
+  const lastKey = lastKeyByTicker.get(ticker);
+  if (lastKey && lastKey !== key) {
+    const prevCandle = candles.get(lastKey);
+    if (prevCandle?.currentCvd !== undefined) {
+      cvdByTicker.set(ticker, prevCandle.currentCvd);
+    }
+  }
+  lastKeyByTicker.set(ticker, key);
 
   const baseCvd = cvdByTicker.get(ticker) || 0;
   const context: MetricCalculationContext = {

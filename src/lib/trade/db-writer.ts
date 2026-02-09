@@ -4,16 +4,19 @@
  * Shared logic for writing candles to the database.
  * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
  *
- * Schema: 18 columns. Only price and CVD have OHLC. All other metrics are raw
- * building blocks that aggregate cleanly via sum/max. Derived ratios (vd_ratio,
- * book_imbalance, price_pct) are calculated at query time.
+ * Schema: 23 columns. Price and CVD have OHLC. Derived metrics (vd_ratio,
+ * book_imbalance, price_pct, divergence) are calculated at write time from
+ * the candle's raw aggregation state.
  */
 
 import type { CandleForDb, CandleState } from "./types.js";
-import { calculateVd } from "../metrics/index.js";
+import { calculateVd, calculateVdRatio } from "../metrics/index.js";
+import { calculateBookImbalance } from "../metrics/book-imbalance.js";
+import { calculatePricePct } from "../metrics/price.js";
+import { calculateDivergence } from "../metrics/absorption.js";
 
 /** Number of columns in the candles INSERT statement */
-export const COLUMNS_PER_ROW = 18;
+export const COLUMNS_PER_ROW = 23;
 
 /**
  * Build placeholder string for parameterized query
@@ -36,15 +39,17 @@ export function buildPlaceholder(offset: number, count: number): string {
 export function buildCandleInsertQuery(tableName: string, placeholders: string[]): string {
   return `
     INSERT INTO ${tableName} (
-      time, ticker,
+      time, ticker, symbol,
       open, high, low, close, volume,
       ask_volume, bid_volume,
       cvd_open, cvd_high, cvd_low, cvd_close,
-      vd,
+      vd, vd_ratio, book_imbalance, price_pct, divergence,
       trades, max_trade_size, big_trades, big_volume
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
+      -- Symbol: always use latest
+      symbol = EXCLUDED.symbol,
       -- Price OHLC: preserve open, update high/low/close
       open = ${tableName}.open,
       high = GREATEST(${tableName}.high, EXCLUDED.high),
@@ -59,8 +64,12 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       cvd_high = GREATEST(COALESCE(${tableName}.cvd_high, EXCLUDED.cvd_high), EXCLUDED.cvd_high),
       cvd_low = LEAST(COALESCE(${tableName}.cvd_low, EXCLUDED.cvd_low), EXCLUDED.cvd_low),
       cvd_close = EXCLUDED.cvd_close,
-      -- Volume Delta
+      -- Volume Delta & derived metrics
       vd = EXCLUDED.vd,
+      vd_ratio = EXCLUDED.vd_ratio,
+      book_imbalance = EXCLUDED.book_imbalance,
+      price_pct = EXCLUDED.price_pct,
+      divergence = EXCLUDED.divergence,
       -- Activity
       trades = EXCLUDED.trades,
       max_trade_size = GREATEST(${tableName}.max_trade_size, EXCLUDED.max_trade_size),
@@ -68,6 +77,19 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       big_volume = EXCLUDED.big_volume
     WHERE EXCLUDED.volume >= ${tableName}.volume
   `;
+}
+
+/**
+ * Calculate derived metrics from candle state.
+ * Used by both fallback and OHLC row builders.
+ */
+function calculateDerivedMetrics(candle: CandleState) {
+  const vd = candle.askVolume - candle.bidVolume;
+  const vdRatio = calculateVdRatio(candle.askVolume, candle.bidVolume);
+  const bookImbalance = calculateBookImbalance(candle.sumBidDepth, candle.sumAskDepth);
+  const pricePct = calculatePricePct(candle.open, candle.close);
+  const divergence = calculateDivergence(pricePct, vdRatio);
+  return { vd, vdRatio, bookImbalance, pricePct, divergence };
 }
 
 /**
@@ -80,11 +102,12 @@ export function buildFallbackRowValues(
   candle: CandleState,
   cvd: number
 ): (string | number | null)[] {
-  const vd = candle.askVolume - candle.bidVolume;
+  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
 
   return [
     time,
     ticker,
+    candle.symbol,
     candle.open,
     candle.high,
     candle.low,
@@ -98,8 +121,12 @@ export function buildFallbackRowValues(
     cvd,
     cvd,
     cvd,
-    // Volume Delta
+    // Volume Delta & derived metrics
     vd,
+    vdRatio,
+    bookImbalance,
+    pricePct,
+    divergence,
     // Activity
     candle.tradeCount,
     candle.maxTradeSize,
@@ -117,11 +144,12 @@ export function buildOhlcRowValues(
   candle: CandleState
 ): (string | number | null)[] {
   const m = candle.metricsOHLC!;
-  const vd = candle.askVolume - candle.bidVolume;
+  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
 
   return [
     time,
     ticker,
+    candle.symbol,
     candle.open,
     candle.high,
     candle.low,
@@ -135,8 +163,12 @@ export function buildOhlcRowValues(
     m.cvd.high,
     m.cvd.low,
     m.cvd.close,
-    // Volume Delta
+    // Volume Delta & derived metrics
     vd,
+    vdRatio,
+    bookImbalance,
+    pricePct,
+    divergence,
     // Activity
     candle.tradeCount,
     candle.maxTradeSize,
