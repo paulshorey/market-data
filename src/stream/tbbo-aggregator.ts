@@ -49,9 +49,6 @@ import {
   FrontMonthTracker,
 } from "../lib/trade/index.js";
 
-// Import metrics calculations
-import { calculateVd } from "../lib/metrics/index.js";
-
 // Re-export TbboRecord for consumers that import from this file
 export type { TbboRecord } from "../lib/trade/index.js";
 
@@ -73,6 +70,9 @@ export class TbboAggregator {
 
   /** Cumulative Volume Delta per ticker - persists across candles */
   private cvdByTicker: Map<string, number> = new Map();
+
+  /** Track the last candle key per ticker so we can carry forward CVD between second buckets */
+  private lastKeyByTicker: Map<string, string> = new Map();
 
   /** Front-month contract tracker (5-minute rolling volume window) */
   private tracker = new FrontMonthTracker();
@@ -173,6 +173,19 @@ export class TbboAggregator {
     }
 
     const key = `${ticker}|${secondBucket}`;
+
+    // When moving to a new second bucket for this ticker, carry forward
+    // CVD from the previous candle so it accumulates correctly across candles.
+    // Without this, every candle gets the same baseCvd (only updated at finalize),
+    // making CVD = baseCvd + this_candle_vd instead of a true running total.
+    const lastKey = this.lastKeyByTicker.get(ticker);
+    if (lastKey && lastKey !== key) {
+      const prevCandle = this.candles.get(lastKey);
+      if (prevCandle?.currentCvd !== undefined) {
+        this.cvdByTicker.set(ticker, prevCandle.currentCvd);
+      }
+    }
+    this.lastKeyByTicker.set(ticker, key);
 
     // Determine trade side using Lee-Ready algorithm as fallback
     const { isAsk, isBid } = determineTradeSide(
@@ -359,15 +372,18 @@ export class TbboAggregator {
   }
 
   /**
-   * Finalize completed candles: update CVD totals and remove from memory
+   * Finalize completed candles: update CVD totals and remove from memory.
+   *
+   * Uses candle.currentCvd (the correctly accumulated value set during addRecord)
+   * rather than recalculating VD, which would double-count since addRecord already
+   * carries forward CVD between second buckets via lastKeyByTicker.
    */
   private finalizeCompletedCandles(candles: CandleForDb[]): void {
     for (const { key, ticker, candle } of candles) {
-      const vd = calculateVd(candle.askVolume, candle.bidVolume);
-
-      // Update CVD
-      const currentCvd = this.cvdByTicker.get(ticker) || 0;
-      this.cvdByTicker.set(ticker, currentCvd + vd);
+      // Use the candle's tracked CVD (already correctly accumulated during addRecord)
+      if (candle.currentCvd !== undefined) {
+        this.cvdByTicker.set(ticker, candle.currentCvd);
+      }
 
       this.candles.delete(key);
     }

@@ -9,7 +9,7 @@
  * 4. BEARISH MOMENTUM - Clean downtrend with no support
  */
 import "dotenv/config";
-import { pool } from "../../src/lib/db.js";
+import { pool } from "../../../src/lib/db.js";
 
 async function run() {
   const ticker = process.argv[2] || "ES";
