@@ -11,7 +11,7 @@
 // Re-exports from Trade Library
 // ============================================================================
 
-export { MAX_TRADE_AGE_MS, nsToMs, getMinuteBucket, toMinuteBucket, checkTradeAge } from "../lib/trade/timestamp.js";
+export { MAX_TRADE_AGE_MS, nsToMs, getMinuteBucket, getSecondBucket, toMinuteBucket, checkTradeAge } from "../lib/trade/timestamp.js";
 
 export { extractTicker } from "../lib/trade/symbol.js";
 

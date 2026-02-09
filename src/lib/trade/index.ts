@@ -26,6 +26,7 @@ export {
   MAX_TRADE_AGE_MS,
   nsToMs,
   getMinuteBucket,
+  getSecondBucket,
   toMinuteBucket,
   checkTradeAge,
 } from "./timestamp.js";

@@ -1,21 +1,25 @@
 /**
  * TBBO Aggregator
  *
- * Aggregates real-time TBBO (trade) data into 1-minute OHLCV candles
- * and writes them to the database every 1 second.
+ * Aggregates real-time TBBO (trade) data into 1-second OHLCV candles
+ * and writes them to the candles_1s hypertable.
+ *
+ * Higher timeframes (1m, 5m, 1h, etc.) are handled by TimescaleDB
+ * continuous aggregates -- not by this code.
  *
  * Features:
+ * - 1-second candle resolution (source of truth for all timeframes)
  * - Volume Delta (VD): per-candle (askVolume - bidVolume)
  * - Cumulative Volume Delta (CVD): running total of VD across candles
- * - Order Flow Metrics with OHLC tracking:
- *   - Each metric tracks Open/High/Low/Close within the minute
- *   - Open: First value (set once)
- *   - High: Maximum value seen
- *   - Low: Minimum value seen
- *   - Close: Latest value (updated every second)
+ * - CVD OHLC tracking within each second
+ * - Front-month contract selection (5-minute rolling volume window)
  * - Lee-Ready algorithm fallback for unknown trade sides
  * - Late trade rejection to prevent data corruption
  * - Graceful handling of DB write failures
+ *
+ * Flush cycle (every 1 second):
+ * - Completed candles (past seconds): written and removed from memory
+ * - In-progress candle (current second): written but kept for continued aggregation
  */
 
 import { pool } from "../lib/db.js";
@@ -35,6 +39,7 @@ import type {
 import {
   MAX_TRADE_AGE_MS,
   nsToMs,
+  getSecondBucket,
   getMinuteBucket,
   extractTicker,
   determineTradeSide,
@@ -55,17 +60,18 @@ export type { TbboRecord } from "../lib/trade/index.js";
 // ============================================================================
 
 /**
- * Aggregates TBBO records into 1-minute candles with VD and CVD tracking
+ * Aggregates TBBO records into 1-second candles with VD and CVD tracking.
+ * Writes to the candles_1s hypertable.
  */
 export class TbboAggregator {
   // -------------------------------------------------------------------------
   // State
   // -------------------------------------------------------------------------
 
-  /** Map of ticker|timestamp -> CandleState for in-progress candles */
+  /** Map of ticker|secondBucket -> CandleState for in-progress candles */
   private candles: Map<string, CandleState> = new Map();
 
-  /** Cumulative Volume Delta per ticker - persists across minutes */
+  /** Cumulative Volume Delta per ticker - persists across candles */
   private cvdByTicker: Map<string, number> = new Map();
 
   /** Front-month contract tracker (5-minute rolling volume window) */
@@ -108,7 +114,7 @@ export class TbboAggregator {
     try {
       const result = await pool.query(`
         SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-        FROM "candles-1m"
+        FROM candles_1s
         WHERE cvd_close IS NOT NULL
         ORDER BY ticker, time DESC
       `);
@@ -149,7 +155,7 @@ export class TbboAggregator {
 
   /**
    * Add a TBBO record to the aggregator
-   * @returns true if accepted, false if rejected (e.g., too old)
+   * @returns true if accepted, false if rejected (e.g., too old or non-front-month)
    */
   addRecord(record: TbboRecord): boolean {
     // Reject late trades to prevent CVD corruption
@@ -158,14 +164,15 @@ export class TbboAggregator {
     }
 
     const ticker = extractTicker(record.symbol);
-    const minuteBucket = getMinuteBucket(record.timestamp);
+    const secondBucket = getSecondBucket(record.timestamp);
 
-    // Check with front-month tracker - skip if not the active contract
+    // FrontMonthTracker evaluates at minute boundaries, so pass minute bucket
+    const minuteBucket = getMinuteBucket(record.timestamp);
     if (!this.tracker.addTrade(record.symbol, ticker, minuteBucket, record.size)) {
       return false;
     }
 
-    const key = `${ticker}|${minuteBucket}`;
+    const key = `${ticker}|${secondBucket}`;
 
     // Determine trade side using Lee-Ready algorithm as fallback
     const { isAsk, isBid } = determineTradeSide(
@@ -189,7 +196,7 @@ export class TbboAggregator {
     // Create normalized trade for candle aggregation
     const normalizedTrade: NormalizedTrade = {
       ticker,
-      minuteBucket,
+      minuteBucket: secondBucket, // NormalizedTrade.minuteBucket holds the bucket timestamp
       price: record.price,
       size: record.size,
       isAsk,
@@ -208,7 +215,7 @@ export class TbboAggregator {
       baseCvd,
     };
 
-    // Add trade and update metrics OHLC
+    // Add trade and update CVD OHLC
     addTradeAndUpdateMetrics(this.candles, key, normalizedTrade, context);
 
     this.recordsProcessed++;
@@ -225,8 +232,8 @@ export class TbboAggregator {
    * Flush completed candles to database and save in-progress candles.
    * Called every 1 second.
    *
-   * - Completed candles (past minutes): Written and removed from memory
-   * - In-progress candles (current minute): Written but kept for continued aggregation
+   * - Completed candles (past seconds): Written and removed from memory
+   * - In-progress candle (current second): Written but kept for continued aggregation
    */
   async flushCompleted(): Promise<void> {
     const { completed, inProgress } = this.partitionCandles();
@@ -236,7 +243,7 @@ export class TbboAggregator {
       const success = await this.writeCandlesToDb(completed);
       if (success) {
         this.finalizeCompletedCandles(completed);
-        console.log(`✅ Flushed ${completed.length} completed candle(s)`);
+        console.log(`✅ Flushed ${completed.length} completed 1s candle(s)`);
       } else {
         console.warn(`⚠️ Keeping ${completed.length} candle(s) in memory - will retry next flush`);
       }
@@ -245,7 +252,6 @@ export class TbboAggregator {
     // Save in-progress candles (keep in memory)
     if (inProgress.length > 0) {
       await this.writeCandlesToDb(inProgress);
-      console.log(`🔄 Saved ${inProgress.length} in-progress candle(s)`);
     }
   }
 
@@ -261,7 +267,7 @@ export class TbboAggregator {
     if (success) {
       this.finalizeCompletedCandles(toFlush);
       this.candles.clear();
-      console.log(`🔄 Flushed all ${toFlush.length} pending candles`);
+      console.log(`🔄 Flushed all ${toFlush.length} pending 1s candles`);
     } else {
       console.error(`❌ Failed to flush ${toFlush.length} candles on shutdown - data may be lost`);
     }
@@ -303,7 +309,7 @@ export class TbboAggregator {
 
       console.log(
         `📊 Aggregator: ${this.recordsProcessed.toLocaleString()} trades → ` +
-          `${this.candles.size} pending candles, ` +
+          `${this.candles.size} pending 1s candles, ` +
           `${this.candlesWritten.toLocaleString()} written | ` +
           `Unknown side: ${unknownPct}%, Late rejected: ${this.stats.lateTradesRejected}`
       );
@@ -316,12 +322,12 @@ export class TbboAggregator {
   // =========================================================================
 
   /**
-   * Partition candles into completed (past minutes) and in-progress (current minute)
+   * Partition candles into completed (past seconds) and in-progress (current second)
    */
   private partitionCandles(): { completed: CandleForDb[]; inProgress: CandleForDb[] } {
     const now = new Date();
-    now.setSeconds(0, 0);
-    const currentMinute = now.toISOString();
+    now.setMilliseconds(0);
+    const currentSecond = now.toISOString();
 
     const completed: CandleForDb[] = [];
     const inProgress: CandleForDb[] = [];
@@ -330,7 +336,7 @@ export class TbboAggregator {
       const [ticker, time] = key.split("|");
       const item = { key, ticker, time, candle };
 
-      if (time < currentMinute) {
+      if (time < currentSecond) {
         completed.push(item);
       } else {
         inProgress.push(item);
@@ -353,7 +359,7 @@ export class TbboAggregator {
   }
 
   /**
-   * Finalize completed candles: update CVD totals, VD history, and remove from memory
+   * Finalize completed candles: update CVD totals and remove from memory
    */
   private finalizeCompletedCandles(candles: CandleForDb[]): void {
     for (const { key, ticker, candle } of candles) {
@@ -372,7 +378,7 @@ export class TbboAggregator {
   // =========================================================================
 
   /**
-   * Write candles to database using batch upsert with OHLC for all metrics
+   * Write candles to candles_1s using batch upsert
    * @returns true if successful, false if failed
    */
   private async writeCandlesToDb(candles: CandleForDb[]): Promise<boolean> {
@@ -392,8 +398,7 @@ export class TbboAggregator {
       };
 
       const { values, placeholders } = buildCandleInsertParams(sorted, cvdContext);
-      // TODO: Update to write 1s candles to candles_1s once live aggregation interval changes
-      const query = buildCandleInsertQuery('"candles-1m"', placeholders);
+      const query = buildCandleInsertQuery("candles_1s", placeholders);
 
       await pool.query(query, values);
       this.candlesWritten += candles.length;

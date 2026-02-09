@@ -56,6 +56,18 @@ export function toMinuteBucket(timestamp: string | number): string {
 }
 
 /**
+ * Get the start of the 1-second bucket for a nanosecond timestamp
+ * @param nsTimestamp - Nanosecond epoch timestamp as string
+ * @returns ISO string for the start of the second (e.g., "2024-01-15T14:30:05.000Z")
+ */
+export function getSecondBucket(nsTimestamp: string): string {
+  const msTimestamp = nsToMs(nsTimestamp);
+  const date = new Date(msTimestamp);
+  date.setMilliseconds(0);
+  return date.toISOString();
+}
+
+/**
  * Check if a trade timestamp is too old to process
  *
  * @param nsTimestamp - Trade timestamp in nanoseconds
