@@ -11,13 +11,7 @@
 // Re-exports from Trade Library
 // ============================================================================
 
-export {
-  MAX_TRADE_AGE_MS,
-  nsToMs,
-  getMinuteBucket,
-  toMinuteBucket,
-  checkTradeAge,
-} from "../lib/trade/timestamp.js";
+export { MAX_TRADE_AGE_MS, nsToMs, getMinuteBucket, toMinuteBucket, checkTradeAge } from "../lib/trade/timestamp.js";
 
 export { extractTicker } from "../lib/trade/symbol.js";
 
@@ -25,11 +19,7 @@ export { inferSideFromPrice, determineTradeSide } from "../lib/trade/side-detect
 
 export { LARGE_TRADE_THRESHOLDS, getLargeTradeThreshold } from "../lib/trade/thresholds.js";
 
-export {
-  createCandleFromTrade,
-  updateCandleWithTrade,
-  addTradeToCandle,
-} from "../lib/trade/candle-aggregation.js";
+export { createCandleFromTrade, updateCandleWithTrade, addTradeToCandle } from "../lib/trade/candle-aggregation.js";
 
 // ============================================================================
 // Re-exports from Metrics Library

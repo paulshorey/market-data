@@ -116,6 +116,8 @@ export interface AggregatorStats {
   candlesWritten: number;
   lateTradesRejected: number;
   unknownSideTrades: number;
+  skippedNonFront: number;
+  activeContracts: Record<string, string>;
   cvdByTicker: Record<string, number>;
 }
 

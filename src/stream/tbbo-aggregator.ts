@@ -41,6 +41,7 @@ import {
   addTradeAndUpdateMetrics,
   buildCandleInsertQuery,
   buildCandleInsertParams,
+  FrontMonthTracker,
 } from "../lib/trade/index.js";
 
 // Import metrics calculations
@@ -66,6 +67,9 @@ export class TbboAggregator {
 
   /** Cumulative Volume Delta per ticker - persists across minutes */
   private cvdByTicker: Map<string, number> = new Map();
+
+  /** Front-month contract tracker (5-minute rolling volume window) */
+  private tracker = new FrontMonthTracker();
 
   /** Whether initialize() has been called */
   private initialized = false;
@@ -133,6 +137,8 @@ export class TbboAggregator {
       candlesWritten: this.candlesWritten,
       lateTradesRejected: this.stats.lateTradesRejected,
       unknownSideTrades: this.stats.unknownSideTrades,
+      skippedNonFront: this.tracker.getSkippedCount(),
+      activeContracts: Object.fromEntries(this.tracker.getActiveContracts()),
       cvdByTicker: Object.fromEntries(this.cvdByTicker),
     };
   }
@@ -153,6 +159,12 @@ export class TbboAggregator {
 
     const ticker = extractTicker(record.symbol);
     const minuteBucket = getMinuteBucket(record.timestamp);
+
+    // Check with front-month tracker - skip if not the active contract
+    if (!this.tracker.addTrade(record.symbol, ticker, minuteBucket, record.size)) {
+      return false;
+    }
+
     const key = `${ticker}|${minuteBucket}`;
 
     // Determine trade side using Lee-Ready algorithm as fallback
@@ -380,7 +392,8 @@ export class TbboAggregator {
       };
 
       const { values, placeholders } = buildCandleInsertParams(sorted, cvdContext);
-      const query = buildCandleInsertQuery(placeholders);
+      // TODO: Update to write 1s candles to candles_1s once live aggregation interval changes
+      const query = buildCandleInsertQuery('"candles-1m"', placeholders);
 
       await pool.query(query, values);
       this.candlesWritten += candles.length;

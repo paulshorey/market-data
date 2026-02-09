@@ -4,14 +4,16 @@
  * Shared logic for writing candles to the database.
  * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
  *
- * Simplified schema: only CVD retains OHLC. All other metrics are single values.
+ * Schema: 18 columns. Only price and CVD have OHLC. All other metrics are raw
+ * building blocks that aggregate cleanly via sum/max. Derived ratios (vd_ratio,
+ * book_imbalance, price_pct) are calculated at query time.
  */
 
 import type { CandleForDb, CandleState } from "./types.js";
-import { calculateOrderFlowMetrics, calculateDivergence } from "../metrics/index.js";
+import { calculateVd } from "../metrics/index.js";
 
 /** Number of columns in the candles INSERT statement */
-export const COLUMNS_PER_ROW = 21;
+export const COLUMNS_PER_ROW = 18;
 
 /**
  * Build placeholder string for parameterized query
@@ -28,44 +30,43 @@ export function buildPlaceholder(offset: number, count: number): string {
 
 /**
  * Build the INSERT query for candles
+ * @param tableName - Target table name (e.g., "candles_1s")
+ * @param placeholders - Array of placeholder strings from buildPlaceholder
  */
-export function buildCandleInsertQuery(placeholders: string[]): string {
+export function buildCandleInsertQuery(tableName: string, placeholders: string[]): string {
   return `
-    INSERT INTO "candles-1m" (
-      time, ticker, symbol, open, high, low, close, volume,
-      -- CVD OHLC (only metric with OHLC tracking)
+    INSERT INTO ${tableName} (
+      time, ticker,
+      open, high, low, close, volume,
+      ask_volume, bid_volume,
       cvd_open, cvd_high, cvd_low, cvd_close,
-      -- Single-value order flow metrics
-      vd, vd_ratio, book_imbalance, price_pct,
-      -- Activity metrics
-      trades, max_trade_size, big_trades, big_volume, divergence
+      vd,
+      trades, max_trade_size, big_trades, big_volume
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
-      symbol = EXCLUDED.symbol,
       -- Price OHLC: preserve open, update high/low/close
-      open = "candles-1m".open,
-      high = GREATEST("candles-1m".high, EXCLUDED.high),
-      low = LEAST("candles-1m".low, EXCLUDED.low),
+      open = ${tableName}.open,
+      high = GREATEST(${tableName}.high, EXCLUDED.high),
+      low = LEAST(${tableName}.low, EXCLUDED.low),
       close = EXCLUDED.close,
       volume = EXCLUDED.volume,
+      -- Volume breakdown
+      ask_volume = EXCLUDED.ask_volume,
+      bid_volume = EXCLUDED.bid_volume,
       -- CVD OHLC
-      cvd_open = COALESCE("candles-1m".cvd_open, EXCLUDED.cvd_open),
-      cvd_high = GREATEST(COALESCE("candles-1m".cvd_high, EXCLUDED.cvd_high), EXCLUDED.cvd_high),
-      cvd_low = LEAST(COALESCE("candles-1m".cvd_low, EXCLUDED.cvd_low), EXCLUDED.cvd_low),
+      cvd_open = COALESCE(${tableName}.cvd_open, EXCLUDED.cvd_open),
+      cvd_high = GREATEST(COALESCE(${tableName}.cvd_high, EXCLUDED.cvd_high), EXCLUDED.cvd_high),
+      cvd_low = LEAST(COALESCE(${tableName}.cvd_low, EXCLUDED.cvd_low), EXCLUDED.cvd_low),
       cvd_close = EXCLUDED.cvd_close,
-      -- Single-value metrics (always use latest)
+      -- Volume Delta
       vd = EXCLUDED.vd,
-      vd_ratio = EXCLUDED.vd_ratio,
-      book_imbalance = EXCLUDED.book_imbalance,
-      price_pct = EXCLUDED.price_pct,
-      -- Activity metrics
+      -- Activity
       trades = EXCLUDED.trades,
-      max_trade_size = GREATEST("candles-1m".max_trade_size, EXCLUDED.max_trade_size),
+      max_trade_size = GREATEST(${tableName}.max_trade_size, EXCLUDED.max_trade_size),
       big_trades = EXCLUDED.big_trades,
-      big_volume = EXCLUDED.big_volume,
-      divergence = EXCLUDED.divergence
-    WHERE EXCLUDED.volume >= "candles-1m".volume
+      big_volume = EXCLUDED.big_volume
+    WHERE EXCLUDED.volume >= ${tableName}.volume
   `;
 }
 
@@ -79,45 +80,31 @@ export function buildFallbackRowValues(
   candle: CandleState,
   cvd: number
 ): (string | number | null)[] {
-  const finalMetrics = calculateOrderFlowMetrics({
-    open: candle.open,
-    close: candle.close,
-    volume: candle.volume,
-    askVolume: candle.askVolume,
-    bidVolume: candle.bidVolume,
-    sumBidDepth: candle.sumBidDepth,
-    sumAskDepth: candle.sumAskDepth,
-    tradeCount: candle.tradeCount,
-    maxTradeSize: candle.maxTradeSize,
-    largeTradeCount: candle.largeTradeCount,
-    largeTradeVolume: candle.largeTradeVolume,
-  });
+  const vd = candle.askVolume - candle.bidVolume;
 
   return [
     time,
     ticker,
-    candle.symbol,
     candle.open,
     candle.high,
     candle.low,
     candle.close,
     candle.volume,
+    // Volume breakdown
+    candle.askVolume,
+    candle.bidVolume,
     // CVD OHLC (all same since no tracking)
     cvd,
     cvd,
     cvd,
     cvd,
-    // Single-value metrics
-    finalMetrics.vd,
-    finalMetrics.vdRatio,
-    finalMetrics.bookImbalance,
-    finalMetrics.pricePct,
-    // Activity metrics
+    // Volume Delta
+    vd,
+    // Activity
     candle.tradeCount,
     candle.maxTradeSize,
     candle.largeTradeCount,
     candle.largeTradeVolume,
-    finalMetrics.divergence,
   ];
 }
 
@@ -130,47 +117,31 @@ export function buildOhlcRowValues(
   candle: CandleState
 ): (string | number | null)[] {
   const m = candle.metricsOHLC!;
-
-  // Calculate final metrics from raw candle state
-  const finalMetrics = calculateOrderFlowMetrics({
-    open: candle.open,
-    close: candle.close,
-    volume: candle.volume,
-    askVolume: candle.askVolume,
-    bidVolume: candle.bidVolume,
-    sumBidDepth: candle.sumBidDepth,
-    sumAskDepth: candle.sumAskDepth,
-    tradeCount: candle.tradeCount,
-    maxTradeSize: candle.maxTradeSize,
-    largeTradeCount: candle.largeTradeCount,
-    largeTradeVolume: candle.largeTradeVolume,
-  });
+  const vd = candle.askVolume - candle.bidVolume;
 
   return [
     time,
     ticker,
-    candle.symbol,
     candle.open,
     candle.high,
     candle.low,
     candle.close,
     candle.volume,
-    // CVD OHLC (tracked throughout the minute)
+    // Volume breakdown
+    candle.askVolume,
+    candle.bidVolume,
+    // CVD OHLC (tracked throughout the candle)
     m.cvd.open,
     m.cvd.high,
     m.cvd.low,
     m.cvd.close,
-    // Single-value metrics (calculated from final candle state)
-    finalMetrics.vd,
-    finalMetrics.vdRatio,
-    finalMetrics.bookImbalance,
-    finalMetrics.pricePct,
-    // Activity metrics
+    // Volume Delta
+    vd,
+    // Activity
     candle.tradeCount,
     candle.maxTradeSize,
     candle.largeTradeCount,
     candle.largeTradeVolume,
-    finalMetrics.divergence,
   ];
 }
 
@@ -208,25 +179,10 @@ export function buildCandleInsertParams(
     placeholders.push(buildPlaceholder(offset, COLUMNS_PER_ROW));
 
     if (!m) {
-      // Fallback: no metricsOHLC, calculate final values
+      // Fallback: no metricsOHLC, calculate CVD from base
       const baseCvd = cvdContext.getBaseCvd(ticker);
-
-      // Calculate VD to get CVD
-      const finalMetrics = calculateOrderFlowMetrics({
-        open: candle.open,
-        close: candle.close,
-        volume: candle.volume,
-        askVolume: candle.askVolume,
-        bidVolume: candle.bidVolume,
-        sumBidDepth: candle.sumBidDepth,
-        sumAskDepth: candle.sumAskDepth,
-        tradeCount: candle.tradeCount,
-        maxTradeSize: candle.maxTradeSize,
-        largeTradeCount: candle.largeTradeCount,
-        largeTradeVolume: candle.largeTradeVolume,
-      });
-
-      const cvd = baseCvd + finalMetrics.vd;
+      const vd = calculateVd(candle.askVolume, candle.bidVolume);
+      const cvd = baseCvd + vd;
       cvdContext.updateCvd?.(ticker, cvd);
 
       values.push(...buildFallbackRowValues(time, ticker, candle, cvd));

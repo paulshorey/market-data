@@ -34,8 +34,7 @@
 │ │ └── ingesting
 │ │ ├── databento-historical-data.md
 │ │ └── databento-live-data.md
-│ ├── deprecated
-│ │ └── timescale-aggregators.md
+│ ├── timescale-aggregators.md
 │ ├── ohlcv
 │ │ ├── ingest-ohlcv-timeframe.md
 │ │ └── ingest-ohlcv-timeframe.ts

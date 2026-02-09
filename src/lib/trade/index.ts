@@ -33,6 +33,9 @@ export {
 // Symbol utilities
 export { extractTicker } from "./symbol.js";
 
+// Front-month contract tracker
+export { FrontMonthTracker } from "./front-month.js";
+
 // Candle aggregation
 export {
   createCandleFromTrade,

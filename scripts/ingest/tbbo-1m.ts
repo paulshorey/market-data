@@ -1,20 +1,15 @@
 #!/usr/bin/env npx tsx
 /**
- * Historical TBBO Data Processor
+ * Historical TBBO Data Processor (1-Minute Resolution)
  *
- * Processes historical TBBO trade data from JSONL files and writes
- * 1-minute OHLCV candles with VD and CVD to the database.
+ * DEPRECATED: With the new candles_1s schema, 1-minute candles are auto-generated
+ * by TimescaleDB continuous aggregates. Use tbbo-1s.ts instead, which writes to
+ * candles_1s. The candles_1m view is auto-populated from candles_1s.
+ *
+ * This script is kept for backward compatibility with the old "candles-1m" table.
  *
  * Usage:
- *   npx tsx scripts/historical-tbbo.ts <file1.json> [file2.json] ...
- *   npx tsx scripts/historical-tbbo.ts ./data/*.json
- *
- * Features:
- * - Processes JSONL files (one JSON object per line)
- * - Calculates Volume Delta (VD) and Cumulative Volume Delta (CVD)
- * - Calculates all order flow metrics with OHLC tracking
- * - Resumable: loads last CVD from database on startup
- * - Batch writes for performance
+ *   npx tsx scripts/ingest/tbbo-1m.ts <file1.json> [file2.json] ...
  */
 
 import "dotenv/config";
@@ -33,6 +28,7 @@ import {
   addTradeAndUpdateMetrics,
   buildCandleInsertQuery,
   buildCandleInsertParams,
+  FrontMonthTracker,
 } from "../../src/lib/trade/index.js";
 
 // ============================================================================
@@ -97,11 +93,14 @@ const LOG_INTERVAL = 100000;
 // State
 // ============================================================================
 
-/** Map of ticker|timestamp -> CandleState */
+/** Map of ticker|timestamp -> CandleState (only the active/front-month contract) */
 const candles: Map<string, CandleState> = new Map();
 
 /** Cumulative Volume Delta per ticker */
 const cvdByTicker: Map<string, number> = new Map();
+
+/** Front-month contract tracker (5-minute rolling volume window) */
+const tracker = new FrontMonthTracker();
 
 /** Statistics */
 const stats = {
@@ -110,6 +109,7 @@ const stats = {
   tradesProcessed: 0,
   candlesWritten: 0,
   skippedNonTrade: 0,
+  skippedSpreads: 0,
   unknownSide: 0,
 };
 
@@ -156,6 +156,12 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
     // Skip non-trade records (if action field exists)
     if (json.action !== undefined && json.action !== "T") {
       stats.skippedNonTrade++;
+      return null;
+    }
+
+    // Skip calendar spreads (e.g., "ESH5-ESM5") - only process outright contracts
+    if (json.symbol.includes("-")) {
+      stats.skippedSpreads++;
       return null;
     }
 
@@ -219,20 +225,28 @@ function parseHistoricalTbbo(line: string): NormalizedTrade | null {
 // ============================================================================
 
 /**
- * Add a trade to the candle map using the shared library function
+ * Add a trade to the candle map.
+ * Uses FrontMonthTracker (5-minute rolling volume window) to determine
+ * which contract is the active front-month. Only trades from the active
+ * contract are aggregated into the stitched ticker candle.
  */
 function addTrade(trade: NormalizedTrade): void {
-  const key = `${trade.ticker}|${trade.minuteBucket}`;
+  const { ticker, symbol } = trade;
 
-  // Get context for metric calculation
-  const baseCvd = cvdByTicker.get(trade.ticker) || 0;
+  // Check with tracker - returns false if this symbol is not the front-month
+  if (!tracker.addTrade(symbol, ticker, trade.minuteBucket, trade.size)) {
+    return;
+  }
+
+  // Key by ticker|minuteBucket for the stitched continuous series
+  const key = `${ticker}|${trade.minuteBucket}`;
+
+  const baseCvd = cvdByTicker.get(ticker) || 0;
   const context: MetricCalculationContext = {
     baseCvd,
   };
 
-  // Use shared candle aggregation with metrics OHLC tracking
   addTradeAndUpdateMetrics(candles, key, trade, context);
-
   stats.tradesProcessed++;
 }
 
@@ -241,12 +255,14 @@ function addTrade(trade: NormalizedTrade): void {
 // ============================================================================
 
 /**
- * Flush all candles to database
+ * Flush all candles to database.
+ * Candles are already filtered to only the active contract per ticker,
+ * so this is a straightforward write.
  */
 async function flushCandles(): Promise<void> {
   if (candles.size === 0) return;
 
-  // Convert to array and sort by ticker, then time
+  // Convert to array and sort by ticker, then time for correct CVD accumulation
   const candleList: CandleForDb[] = [];
   for (const [key, candle] of candles) {
     const [ticker, time] = key.split("|");
@@ -287,7 +303,8 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
   };
 
   const { values, placeholders } = buildCandleInsertParams(batch, cvdContext);
-  const query = buildCandleInsertQuery(placeholders);
+  // NOTE: Writing to old "candles-1m" table. For new schema, use tbbo-1s.ts → candles_1s.
+  const query = buildCandleInsertQuery('"candles-1m"', placeholders);
 
   await pool.query(query, values);
   stats.candlesWritten += batch.length;
@@ -374,8 +391,23 @@ async function main(): Promise<void> {
   console.log(`   Lines processed:    ${stats.linesProcessed.toLocaleString()}`);
   console.log(`   Trades processed:   ${stats.tradesProcessed.toLocaleString()}`);
   console.log(`   Candles written:    ${stats.candlesWritten.toLocaleString()}`);
+  console.log(`   Skipped non-front:  ${tracker.getSkippedCount().toLocaleString()}`);
+  console.log(`   Skipped spreads:    ${stats.skippedSpreads.toLocaleString()}`);
   console.log(`   Skipped non-trade:  ${stats.skippedNonTrade.toLocaleString()}`);
   console.log(`   Unknown side:       ${stats.unknownSide.toLocaleString()}`);
+  console.log("");
+  console.log("   Active contract per ticker:");
+  for (const [ticker, symbol] of tracker.getActiveContracts()) {
+    const vol = tracker.getTotalVolumeBySymbol().get(symbol) || 0;
+    console.log(`     ${ticker} → ${symbol} (vol ${vol.toLocaleString()})`);
+  }
+  console.log("");
+  console.log("   Volume by contract:");
+  const sortedSymbols = [...tracker.getTotalVolumeBySymbol().entries()].sort((a, b) => b[1] - a[1]);
+  for (const [symbol, vol] of sortedSymbols) {
+    const ticker = extractTicker(symbol);
+    console.log(`     ${symbol} (${ticker}): ${vol.toLocaleString()}`);
+  }
   console.log("");
   console.log("   Final CVD values:");
   for (const [ticker, cvd] of cvdByTicker) {

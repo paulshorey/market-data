@@ -8,19 +8,16 @@ interface Timeframe {
 
 /**
  * Timeframe configurations
- * Note: "candles-1m" uses dash, others use underscore
+ * All tables use underscores (candles_1s, candles_1m, etc.)
+ * candles_1s is the base hypertable; all others are continuous aggregates.
  */
 export const TIMEFRAMES: Timeframe[] = [
-  { id: "1m", table: "candles-1m", ms: 60 * 1000 },
-  { id: "3m", table: "candles_3m", ms: 3 * 60 * 1000 },
-  { id: "7m", table: "candles_7m", ms: 7 * 60 * 1000 },
-  { id: "19m", table: "candles_19m", ms: 19 * 60 * 1000 },
-  { id: "29m", table: "candles_29m", ms: 29 * 60 * 1000 },
-  { id: "59m", table: "candles_59m", ms: 59 * 60 * 1000 },
-  { id: "109m", table: "candles_109m", ms: 109 * 60 * 1000 },
-  { id: "181m", table: "candles_181m", ms: 181 * 60 * 1000 },
+  { id: "1s", table: "candles_1s", ms: 1000 },
+  { id: "1m", table: "candles_1m", ms: 60 * 1000 },
+  { id: "5m", table: "candles_5m", ms: 5 * 60 * 1000 },
+  { id: "15m", table: "candles_15m", ms: 15 * 60 * 1000 },
+  { id: "1h", table: "candles_1h", ms: 60 * 60 * 1000 },
   { id: "1d", table: "candles_1d", ms: 24 * 60 * 60 * 1000 },
-  { id: "1w", table: "candles_1w", ms: 7 * 24 * 60 * 60 * 1000 },
 ];
 
 // Target number of candles to return (aim for good chart density)
@@ -63,7 +60,7 @@ async function getMaxTimeInTable(
   ticker: string
 ): Promise<number | null> {
   const result = await pool.query(
-    `SELECT MAX(time) as max_time FROM "${table}" WHERE ticker = $1`,
+    `SELECT MAX(time) as max_time FROM ${table} WHERE ticker = $1`,
     [ticker]
   );
   if (!result.rows[0]?.max_time) {
@@ -120,10 +117,9 @@ export async function getCandles(
   const startISO = new Date(startMs).toISOString();
   const endISO = new Date(endMs).toISOString();
 
-  // Build query - table name uses double quotes due to dash in "candles-1m"
   const query = `
     SELECT time, open, high, low, close, volume
-    FROM "${timeframe.table}"
+    FROM ${timeframe.table}
     WHERE time >= $1 AND time <= $2 AND ticker = $3
     ORDER BY time ASC
   `;
@@ -156,14 +152,13 @@ interface DateRange {
 
 /**
  * Get the date range available for a ticker
- * Queries the 1-minute table as it has the most recent data
+ * Queries the 1-second base table as it has the most recent data
  */
 export async function getDateRange(ticker: string): Promise<DateRange | null> {
-  // Query the 1m table for range (most granular, has latest data)
   const result = await pool.query(
     `
     SELECT MIN(time) as min_time, MAX(time) as max_time
-    FROM "candles-1m"
+    FROM candles_1s
     WHERE ticker = $1
   `,
     [ticker]
