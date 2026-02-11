@@ -51,40 +51,32 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
-      -- Symbol: always use latest
       symbol = EXCLUDED.symbol,
-      -- Price OHLC: preserve open, update high/low/close
-      open = ${tableName}.open,
-      high = GREATEST(${tableName}.high, EXCLUDED.high),
-      low = LEAST(${tableName}.low, EXCLUDED.low),
+      open = EXCLUDED.open,
+      high = EXCLUDED.high,
+      low = EXCLUDED.low,
       close = EXCLUDED.close,
       volume = EXCLUDED.volume,
-      -- Volume breakdown
       ask_volume = EXCLUDED.ask_volume,
       bid_volume = EXCLUDED.bid_volume,
-      -- CVD OHLC
-      cvd_open = COALESCE(${tableName}.cvd_open, EXCLUDED.cvd_open),
-      cvd_high = GREATEST(COALESCE(${tableName}.cvd_high, EXCLUDED.cvd_high), EXCLUDED.cvd_high),
-      cvd_low = LEAST(COALESCE(${tableName}.cvd_low, EXCLUDED.cvd_low), EXCLUDED.cvd_low),
+      cvd_open = EXCLUDED.cvd_open,
+      cvd_high = EXCLUDED.cvd_high,
+      cvd_low = EXCLUDED.cvd_low,
       cvd_close = EXCLUDED.cvd_close,
-      -- Volume Delta & derived metrics
       vd = EXCLUDED.vd,
       vd_ratio = EXCLUDED.vd_ratio,
       book_imbalance = EXCLUDED.book_imbalance,
       price_pct = EXCLUDED.price_pct,
       divergence = EXCLUDED.divergence,
-      -- Activity
       trades = EXCLUDED.trades,
-      max_trade_size = GREATEST(${tableName}.max_trade_size, EXCLUDED.max_trade_size),
+      max_trade_size = EXCLUDED.max_trade_size,
       big_trades = EXCLUDED.big_trades,
       big_volume = EXCLUDED.big_volume,
-      -- Raw accumulators
       sum_bid_depth = EXCLUDED.sum_bid_depth,
       sum_ask_depth = EXCLUDED.sum_ask_depth,
       sum_price_volume = EXCLUDED.sum_price_volume,
       unknown_volume = EXCLUDED.unknown_volume,
       vwap = EXCLUDED.vwap
-    WHERE EXCLUDED.volume >= ${tableName}.volume
   `;
 }
 
