@@ -4,9 +4,11 @@
  * Shared logic for writing candles to the database.
  * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
  *
- * Schema: 23 columns. Price and CVD have OHLC. Derived metrics (vd_ratio,
- * book_imbalance, price_pct, divergence) are calculated at write time from
- * the candle's raw aggregation state.
+ * Schema: 28 columns. Price and CVD have OHLC. Derived metrics (vd_ratio,
+ * book_imbalance, price_pct, divergence, vwap) are calculated at write time
+ * from the candle's raw aggregation state. Raw accumulators (sum_bid_depth,
+ * sum_ask_depth, sum_price_volume, unknown_volume) are stored for correct
+ * higher-timeframe aggregation.
  */
 
 import type { CandleForDb, CandleState } from "./types.js";
@@ -16,7 +18,7 @@ import { calculatePricePct } from "../metrics/price.js";
 import { calculateDivergence } from "../metrics/absorption.js";
 
 /** Number of columns in the candles INSERT statement */
-export const COLUMNS_PER_ROW = 23;
+export const COLUMNS_PER_ROW = 28;
 
 /**
  * Build placeholder string for parameterized query
@@ -44,7 +46,8 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       ask_volume, bid_volume,
       cvd_open, cvd_high, cvd_low, cvd_close,
       vd, vd_ratio, book_imbalance, price_pct, divergence,
-      trades, max_trade_size, big_trades, big_volume
+      trades, max_trade_size, big_trades, big_volume,
+      sum_bid_depth, sum_ask_depth, sum_price_volume, unknown_volume, vwap
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
@@ -74,7 +77,13 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       trades = EXCLUDED.trades,
       max_trade_size = GREATEST(${tableName}.max_trade_size, EXCLUDED.max_trade_size),
       big_trades = EXCLUDED.big_trades,
-      big_volume = EXCLUDED.big_volume
+      big_volume = EXCLUDED.big_volume,
+      -- Raw accumulators
+      sum_bid_depth = EXCLUDED.sum_bid_depth,
+      sum_ask_depth = EXCLUDED.sum_ask_depth,
+      sum_price_volume = EXCLUDED.sum_price_volume,
+      unknown_volume = EXCLUDED.unknown_volume,
+      vwap = EXCLUDED.vwap
     WHERE EXCLUDED.volume >= ${tableName}.volume
   `;
 }
@@ -89,7 +98,8 @@ function calculateDerivedMetrics(candle: CandleState) {
   const bookImbalance = calculateBookImbalance(candle.sumBidDepth, candle.sumAskDepth);
   const pricePct = calculatePricePct(candle.open, candle.close);
   const divergence = calculateDivergence(pricePct, vdRatio);
-  return { vd, vdRatio, bookImbalance, pricePct, divergence };
+  const vwap = candle.volume > 0 ? candle.sumPriceVolume / candle.volume : null;
+  return { vd, vdRatio, bookImbalance, pricePct, divergence, vwap };
 }
 
 /**
@@ -102,7 +112,7 @@ export function buildFallbackRowValues(
   candle: CandleState,
   cvd: number
 ): (string | number | null)[] {
-  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
+  const { vd, vdRatio, bookImbalance, pricePct, divergence, vwap } = calculateDerivedMetrics(candle);
 
   return [
     time,
@@ -132,6 +142,12 @@ export function buildFallbackRowValues(
     candle.maxTradeSize,
     candle.largeTradeCount,
     candle.largeTradeVolume,
+    // Raw accumulators for higher-timeframe aggregation
+    candle.sumBidDepth,
+    candle.sumAskDepth,
+    candle.sumPriceVolume,
+    candle.unknownSideVolume,
+    vwap,
   ];
 }
 
@@ -144,7 +160,7 @@ export function buildOhlcRowValues(
   candle: CandleState
 ): (string | number | null)[] {
   const m = candle.metricsOHLC!;
-  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
+  const { vd, vdRatio, bookImbalance, pricePct, divergence, vwap } = calculateDerivedMetrics(candle);
 
   return [
     time,
@@ -174,6 +190,12 @@ export function buildOhlcRowValues(
     candle.maxTradeSize,
     candle.largeTradeCount,
     candle.largeTradeVolume,
+    // Raw accumulators for higher-timeframe aggregation
+    candle.sumBidDepth,
+    candle.sumAskDepth,
+    candle.sumPriceVolume,
+    candle.unknownSideVolume,
+    vwap,
   ];
 }
 
