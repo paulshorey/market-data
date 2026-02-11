@@ -10,7 +10,7 @@
 
 import { createConnection, Socket } from "net";
 import { createHash } from "crypto";
-import { TbboAggregator, TbboRecord } from "./tbbo-aggregator.js";
+import { Tbbo1mAggregator, TbboRecord } from "./tbbo-1m-aggregator.js";
 
 // Configuration from environment (all required - no defaults)
 const DATABENTO_API_KEY = process.env.DATABENTO_API_KEY;
@@ -75,7 +75,7 @@ interface StreamState {
   sessionStarted: boolean;
   reconnectAttempts: number;
   shouldReconnect: boolean;
-  aggregator: TbboAggregator | null;
+  aggregator: Tbbo1mAggregator | null;
 }
 
 const state: StreamState = {
@@ -567,9 +567,9 @@ export async function startDatabentoStream(): Promise<void> {
   console.log(`   API Key: ${apiKeyPreview}`);
   console.log("═".repeat(50));
 
-  // Initialize the aggregator (writes candles to database)
+  // Initialize the rolling 1-minute aggregator (writes candles to candles_1m)
   // This loads the last CVD values from the database to ensure continuity
-  state.aggregator = new TbboAggregator();
+  state.aggregator = new Tbbo1mAggregator();
   await state.aggregator.initialize();
 
   // Start periodic flush (every 1 second to keep database current)
