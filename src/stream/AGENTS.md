@@ -19,9 +19,7 @@ Real-time TBBO trade data from Databento, aggregated into rolling 1-minute candl
   - **Flush cycle** (every 1 second):
     - Stale seconds (current second is behind wall-clock time) are finalized
     - Pending 1-minute rolling candles are written to `candles_1m`
-  - **CVD continuity**: on startup, loads the latest `cvd_close` per ticker from `candles_1m` (falls back to `candles_1s`) so CVD is continuous across restarts
-
-- **`tbbo-aggregator.ts`** (legacy) -- the original 1-second aggregator that wrote to `candles_1s`. Kept for reference but no longer used by the live stream.
+  - **CVD continuity**: on startup, loads the latest `cvd_close` per ticker from `candles_1m` so CVD is continuous across restarts
 
 - **`types.ts`** and **`utils.ts`** re-export types and utilities from `src/lib/trade/` and `src/lib/metrics/`
 
@@ -48,4 +46,4 @@ The stream-specific code only handles: TCP connection, Databento protocol, JSON 
 
 ## CVD Continuity
 
-On startup, the aggregator queries `candles_1m` (falling back to `candles_1s`) for the latest `cvd_close` per ticker. This ensures CVD is continuous across server restarts. If the tables are empty or unreachable, CVD starts from 0.
+On startup, the aggregator queries `candles_1m` for the latest `cvd_close` per ticker. This ensures CVD is continuous across server restarts. If the table is empty or unreachable, CVD starts from 0.

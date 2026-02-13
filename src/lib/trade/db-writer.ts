@@ -2,13 +2,14 @@
  * Database Writer for Candles
  *
  * Shared logic for writing candles to the database.
- * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
+ * Used by both live streaming (tbbo-1m-aggregator) and historical ingest (tbbo-1m-1s).
  *
- * Schema: 28 columns. Price and CVD have OHLC. Derived metrics (vd_ratio,
- * book_imbalance, price_pct, divergence, vwap) are calculated at write time
- * from the candle's raw aggregation state. Raw accumulators (sum_bid_depth,
+ * Schema: 27 columns. Price and CVD have OHLC. Derived metrics (vd_ratio,
+ * book_imbalance, price_pct, divergence) are calculated at write time from
+ * the candle's raw aggregation state. Raw accumulators (sum_bid_depth,
  * sum_ask_depth, sum_price_volume, unknown_volume) are stored for correct
- * higher-timeframe aggregation.
+ * higher-timeframe aggregation. VWAP is derived at query time from
+ * sum_price_volume / volume — not stored per-row.
  */
 
 import type { CandleForDb, CandleState } from "./types.js";
@@ -18,7 +19,7 @@ import { calculatePricePct } from "../metrics/price.js";
 import { calculateDivergence } from "../metrics/absorption.js";
 
 /** Number of columns in the candles INSERT statement */
-export const COLUMNS_PER_ROW = 28;
+export const COLUMNS_PER_ROW = 27;
 
 /**
  * Build placeholder string for parameterized query
@@ -35,7 +36,7 @@ export function buildPlaceholder(offset: number, count: number): string {
 
 /**
  * Build the INSERT query for candles
- * @param tableName - Target table name (e.g., "candles_1s")
+ * @param tableName - Target table name (e.g., "candles_1m")
  * @param placeholders - Array of placeholder strings from buildPlaceholder
  */
 export function buildCandleInsertQuery(tableName: string, placeholders: string[]): string {
@@ -47,7 +48,7 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       cvd_open, cvd_high, cvd_low, cvd_close,
       vd, vd_ratio, book_imbalance, price_pct, divergence,
       trades, max_trade_size, big_trades, big_volume,
-      sum_bid_depth, sum_ask_depth, sum_price_volume, unknown_volume, vwap
+      sum_bid_depth, sum_ask_depth, sum_price_volume, unknown_volume
     )
     VALUES ${placeholders.join(", ")}
     ON CONFLICT (ticker, time) DO UPDATE SET
@@ -75,8 +76,7 @@ export function buildCandleInsertQuery(tableName: string, placeholders: string[]
       sum_bid_depth = EXCLUDED.sum_bid_depth,
       sum_ask_depth = EXCLUDED.sum_ask_depth,
       sum_price_volume = EXCLUDED.sum_price_volume,
-      unknown_volume = EXCLUDED.unknown_volume,
-      vwap = EXCLUDED.vwap
+      unknown_volume = EXCLUDED.unknown_volume
   `;
 }
 
@@ -90,8 +90,7 @@ function calculateDerivedMetrics(candle: CandleState) {
   const bookImbalance = calculateBookImbalance(candle.sumBidDepth, candle.sumAskDepth);
   const pricePct = calculatePricePct(candle.open, candle.close);
   const divergence = calculateDivergence(pricePct, vdRatio);
-  const vwap = candle.volume > 0 ? candle.sumPriceVolume / candle.volume : null;
-  return { vd, vdRatio, bookImbalance, pricePct, divergence, vwap };
+  return { vd, vdRatio, bookImbalance, pricePct, divergence };
 }
 
 /**
@@ -104,7 +103,7 @@ export function buildFallbackRowValues(
   candle: CandleState,
   cvd: number
 ): (string | number | null)[] {
-  const { vd, vdRatio, bookImbalance, pricePct, divergence, vwap } = calculateDerivedMetrics(candle);
+  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
 
   return [
     time,
@@ -139,7 +138,6 @@ export function buildFallbackRowValues(
     candle.sumAskDepth,
     candle.sumPriceVolume,
     candle.unknownSideVolume,
-    vwap,
   ];
 }
 
@@ -152,7 +150,7 @@ export function buildOhlcRowValues(
   candle: CandleState
 ): (string | number | null)[] {
   const m = candle.metricsOHLC!;
-  const { vd, vdRatio, bookImbalance, pricePct, divergence, vwap } = calculateDerivedMetrics(candle);
+  const { vd, vdRatio, bookImbalance, pricePct, divergence } = calculateDerivedMetrics(candle);
 
   return [
     time,
@@ -187,7 +185,6 @@ export function buildOhlcRowValues(
     candle.sumAskDepth,
     candle.sumPriceVolume,
     candle.unknownSideVolume,
-    vwap,
   ];
 }
 

@@ -8,11 +8,10 @@ interface Timeframe {
 
 /**
  * Timeframe configurations
- * All tables use underscores (candles_1s, candles_1m, etc.)
- * candles_1s is the base hypertable; all others are continuous aggregates.
+ * candles_1m is the base hypertable (written at 1-second resolution).
+ * Higher timeframes are TimescaleDB continuous aggregates.
  */
 export const TIMEFRAMES: Timeframe[] = [
-  { id: "1s", table: "candles_1s", ms: 1000 },
   { id: "1m", table: "candles_1m", ms: 60 * 1000 },
   { id: "5m", table: "candles_5m", ms: 5 * 60 * 1000 },
   { id: "15m", table: "candles_15m", ms: 15 * 60 * 1000 },
@@ -152,13 +151,13 @@ interface DateRange {
 
 /**
  * Get the date range available for a ticker
- * Queries the 1-second base table as it has the most recent data
+ * Queries the candles_1m base table (written at 1-second resolution)
  */
 export async function getDateRange(ticker: string): Promise<DateRange | null> {
   const result = await pool.query(
     `
     SELECT MIN(time) as min_time, MAX(time) as max_time
-    FROM candles_1s
+    FROM candles_1m
     WHERE ticker = $1
   `,
     [ticker]

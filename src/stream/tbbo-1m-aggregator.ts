@@ -211,8 +211,7 @@ export class Tbbo1mAggregator {
   }
 
   /**
-   * Initialize the aggregator by loading last CVD values from database.
-   * Tries candles_1m first, falls back to candles_1s for continuity.
+   * Initialize the aggregator by loading last CVD values from candles_1m.
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
@@ -221,22 +220,12 @@ export class Tbbo1mAggregator {
     }
 
     try {
-      let result;
-      try {
-        result = await pool.query(`
-          SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-          FROM ${TARGET_TABLE}
-          WHERE cvd_close IS NOT NULL
-          ORDER BY ticker, time DESC
-        `);
-      } catch {
-        result = await pool.query(`
-          SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-          FROM candles_1s
-          WHERE cvd_close IS NOT NULL
-          ORDER BY ticker, time DESC
-        `);
-      }
+      const result = await pool.query(`
+        SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
+        FROM ${TARGET_TABLE}
+        WHERE cvd_close IS NOT NULL
+        ORDER BY ticker, time DESC
+      `);
 
       for (const row of result.rows) {
         const cvd = parseFloat(row.cvd) || 0;

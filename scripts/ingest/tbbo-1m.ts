@@ -2,9 +2,8 @@
 /**
  * Historical TBBO Data Processor (1-Minute Resolution)
  *
- * DEPRECATED: With the new candles_1s schema, 1-minute candles are auto-generated
- * by TimescaleDB continuous aggregates. Use tbbo-1s.ts instead, which writes to
- * candles_1s. The candles_1m view is auto-populated from candles_1s.
+ * DEPRECATED: Use tbbo-1m-1s.ts instead, which writes rolling 1-minute candles
+ * at 1-second resolution to the candles_1m hypertable.
  *
  * This script is kept for backward compatibility with the old "candles-1m" table.
  *
@@ -303,7 +302,7 @@ async function writeBatch(batch: CandleForDb[], runningCvd: Map<string, number>)
   };
 
   const { values, placeholders } = buildCandleInsertParams(batch, cvdContext);
-  // NOTE: Writing to old "candles-1m" table. For new schema, use tbbo-1s.ts → candles_1s.
+  // NOTE: Writing to old "candles-1m" table. For new schema, use tbbo-1m-1s.ts → candles_1m.
   const query = buildCandleInsertQuery('"candles-1m"', placeholders);
 
   await pool.query(query, values);

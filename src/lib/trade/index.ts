@@ -2,7 +2,7 @@
  * Trade Processing Library
  *
  * Shared utilities for processing TBBO trade data into candles with order flow metrics.
- * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
+ * Used by both live streaming (tbbo-1m-aggregator) and historical ingest (tbbo-1m-1s).
  */
 
 // Types

@@ -2,7 +2,7 @@
  * Candle Aggregation
  *
  * Shared logic for aggregating trades into OHLCV candles with order flow metrics.
- * Used by both streaming (tbbo-aggregator) and historical (historical-tbbo) processors.
+ * Used by both live streaming (tbbo-1m-aggregator) and historical ingest (tbbo-1m-1s).
  *
  * Only CVD retains OHLC tracking (it's a running total that evolves within a candle).
  * All other metrics are calculated once at flush time from the candle's raw state.

@@ -1,8 +1,12 @@
 -- ============================================================================
 -- Candles Schema Setup (TimescaleDB)
 --
--- Source of truth: candles_1s (1-second hypertable)
+-- Source of truth: candles_1m (1-minute hypertable, written at 1-second resolution)
 -- Higher timeframes: continuous aggregates (auto-updated materialized views)
+--
+-- The application writes rolling 1-minute candles every second. Each row
+-- represents the trailing 60-second window of trade data, giving ~60 rows
+-- per minute per ticker. Higher timeframes aggregate from this base table.
 --
 -- Run this script against a TimescaleDB database.
 -- Full documentation: docs/data-storage/timescale-aggregators.md
@@ -11,14 +15,17 @@
 
 -- ── 1. Base hypertable ───────────────────────────────────────
 
--- Teardown
-DROP MATERIALIZED VIEW IF EXISTS candles_1m CASCADE;
-DROP TABLE IF EXISTS candles_1s CASCADE;
+-- Teardown (in reverse dependency order)
+DROP MATERIALIZED VIEW IF EXISTS candles_60m CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS candles_15m CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS candles_5m CASCADE;
+DROP TABLE IF EXISTS candles_1m CASCADE;
 
 -- Create base table
-CREATE TABLE candles_1s (
+CREATE TABLE candles_1m (
   time           TIMESTAMPTZ      NOT NULL,
   ticker         TEXT             NOT NULL,
+  symbol         TEXT,
   open           DOUBLE PRECISION NOT NULL,
   high           DOUBLE PRECISION NOT NULL,
   low            DOUBLE PRECISION NOT NULL,
@@ -44,41 +51,29 @@ CREATE TABLE candles_1s (
   sum_ask_depth    DOUBLE PRECISION DEFAULT 0,
   sum_price_volume DOUBLE PRECISION DEFAULT 0,
   unknown_volume   DOUBLE PRECISION DEFAULT 0,
-  vwap             DOUBLE PRECISION,
   PRIMARY KEY (ticker, time)
 );
--- Convert to hypertable to enable TimescaleDB aggregation features
-SELECT create_hypertable('candles_1s', by_range('time', INTERVAL '1 week'));
--- If table already has data, add: migrate_data => true
-SELECT create_hypertable('candles_1s', by_range('time', INTERVAL '1 week'), migrate_data => true);
 
--- If `candles_1s` already exists as a regular PostgreSQL table with data:
--- Convert existing table to hypertable
--- migrate_data => true moves existing rows into chunks
-SELECT create_hypertable('candles_1s', by_range('time', INTERVAL '1 week'),
-  migrate_data => true
-);
+-- Convert to hypertable (1-week chunks)
+SELECT create_hypertable('candles_1m', by_range('time', INTERVAL '1 week'));
 
--- If the table has a different primary key or constraints that conflict, you may need to drop and recreate them first:
--- If needed: drop old PK, add the correct one, then convert
-ALTER TABLE candles_1s DROP CONSTRAINT IF EXISTS candles_1s_pkey;
-ALTER TABLE candles_1s ADD PRIMARY KEY (ticker, time);
-SELECT create_hypertable('candles_1s', by_range('time', INTERVAL '1 week'),
-  migrate_data => true
-);
+-- If candles_1m already exists as a regular PostgreSQL table with data:
+-- SELECT create_hypertable('candles_1m', by_range('time', INTERVAL '1 week'),
+--   migrate_data => true
+-- );
 
 
 -- ── 2. Indexes ───────────────────────────────────────────────
-CREATE INDEX idx_candles_1s_time ON candles_1s (time DESC);
+CREATE INDEX idx_candles_1m_time ON candles_1m (time DESC);
 
 
 -- ── 3. Compression ───────────────────────────────────────────
-ALTER TABLE candles_1s SET (
+ALTER TABLE candles_1m SET (
   timescaledb.compress,
   timescaledb.compress_segmentby = 'ticker',
   timescaledb.compress_orderby = 'time DESC'
 );
-SELECT add_compression_policy('candles_1s', INTERVAL '1 week');
+SELECT add_compression_policy('candles_1m', INTERVAL '1 week');
 
 -- Check compression status
 SELECT
@@ -86,11 +81,11 @@ SELECT
   before_compression_total_bytes,
   after_compression_total_bytes,
   compression_ratio
-FROM chunk_compression_stats('candles_1s')
+FROM chunk_compression_stats('candles_1m')
 ORDER BY chunk_name;
 
 -- List all chunks
-SELECT show_chunks('candles_1s');
+SELECT show_chunks('candles_1m');
 
 -- Compress one
 SELECT compress_chunk('_timescaledb_internal._hyper_1_1_chunk');
@@ -99,51 +94,14 @@ SELECT compress_chunk('_timescaledb_internal._hyper_1_1_chunk');
 SELECT decompress_chunk('_timescaledb_internal._hyper_1_1_chunk');
 
 
--- ── 4. Continuous aggregates ─────────────────────────────────
-
--- 1-minute (from 1-second)
-CREATE MATERIALIZED VIEW candles_1m
-WITH (timescaledb.continuous) AS
-SELECT
-  time_bucket('1 minute', time) AS time, ticker,
-  first(open, time) AS open, max(high) AS high,
-  min(low) AS low, last(close, time) AS close,
-  sum(volume) AS volume,
-  sum(ask_volume) AS ask_volume, sum(bid_volume) AS bid_volume,
-  first(cvd_open, time) AS cvd_open, max(cvd_high) AS cvd_high,
-  min(cvd_low) AS cvd_low, last(cvd_close, time) AS cvd_close,
-  sum(vd) AS vd,
-  -- Recomputed derived metrics (not summed/averaged from 1s values)
-  (sum(ask_volume) - sum(bid_volume))
-    / NULLIF(sum(ask_volume) + sum(bid_volume), 0) AS vd_ratio,
-  (sum(sum_bid_depth) - sum(sum_ask_depth))
-    / NULLIF(sum(sum_bid_depth) + sum(sum_ask_depth), 0) AS book_imbalance,
-  sum(trades) AS trades, max(max_trade_size) AS max_trade_size,
-  sum(big_trades) AS big_trades, sum(big_volume) AS big_volume,
-  -- Raw accumulators for further aggregation
-  sum(sum_bid_depth) AS sum_bid_depth,
-  sum(sum_ask_depth) AS sum_ask_depth,
-  sum(sum_price_volume) AS sum_price_volume,
-  sum(unknown_volume) AS unknown_volume,
-  sum(sum_price_volume) / NULLIF(sum(volume), 0) AS vwap
-FROM candles_1s
-GROUP BY time_bucket('1 minute', time), ticker
-WITH NO DATA;
-
-
--- ── 5. Higher-timeframe continuous aggregates ──────────────────
+-- ── 4. Higher-timeframe continuous aggregates ──────────────────
 --
--- These aggregate from the 1m continuous aggregate (candles_1m).
+-- These aggregate from candles_1m (the base hypertable).
 -- Derived metrics (vd_ratio, book_imbalance, vwap, price_pct, divergence)
 -- are recomputed from raw accumulators — NEVER averaged from lower TF ratios.
 --
 -- TimescaleDB supports hierarchical continuous aggregates (cagg-on-cagg)
 -- since v2.9. Each layer references the one below it.
-
--- Teardown (in reverse dependency order)
-DROP MATERIALIZED VIEW IF EXISTS candles_60m CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS candles_15m CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS candles_5m CASCADE;
 
 -- 5-minute (from 1-minute)
 CREATE MATERIALIZED VIEW candles_5m
@@ -260,13 +218,7 @@ GROUP BY time_bucket('60 minutes', time), ticker
 WITH NO DATA;
 
 
--- ── 6. Refresh policies ─────────────────────────────────────
-
--- 1m: refresh every 10s, looking back 5 minutes
-SELECT add_continuous_aggregate_policy('candles_1m',
-  start_offset => INTERVAL '5 minutes',
-  end_offset   => INTERVAL '10 seconds',
-  schedule_interval => INTERVAL '10 seconds');
+-- ── 5. Refresh policies ─────────────────────────────────────
 
 -- 5m: refresh every 30s, looking back 15 minutes
 SELECT add_continuous_aggregate_policy('candles_5m',
@@ -287,15 +239,14 @@ SELECT add_continuous_aggregate_policy('candles_60m',
   schedule_interval => INTERVAL '5 minutes');
 
 
--- ── 7. Backfill (run after loading historical data) ──────────
+-- ── 6. Backfill (run after loading historical data) ──────────
 -- Refresh in order from lowest to highest timeframe
-CALL refresh_continuous_aggregate('candles_1m', NULL, NULL);
 CALL refresh_continuous_aggregate('candles_5m', NULL, NULL);
 CALL refresh_continuous_aggregate('candles_15m', NULL, NULL);
 CALL refresh_continuous_aggregate('candles_60m', NULL, NULL);
 
 
--- ── 8. Example: Deriving additional metrics at query time ────
+-- ── 7. Example: Deriving additional metrics at query time ────
 --
 -- price_pct and divergence are computed from the aggregated data,
 -- not stored in the continuous aggregates (to avoid schema bloat):

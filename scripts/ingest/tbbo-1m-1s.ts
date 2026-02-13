@@ -10,7 +10,7 @@
  * instead of the traditional 1 row per minute.
  *
  * Algorithm:
- *   1. Trades are aggregated into 1-second buckets (same logic as tbbo-1s.ts)
+ *   1. Trades are aggregated into 1-second buckets
  *   2. Each completed 1-second bucket is stored as a SecondSummary
  *   3. A sliding window of the last 60 SecondSummaries is maintained per ticker
  *   4. Each second, the window is aggregated into a single 1-minute candle
@@ -23,9 +23,7 @@
  *   npx tsx scripts/ingest/tbbo-1m-1s.ts <file1.json> [file2.json] ...
  *   npx tsx scripts/ingest/tbbo-1m-1s.ts ./data/*.json
  *
- * Requires table "candles_1m" with same schema as candles_1s.
- * NOTE: If the TimescaleDB continuous aggregate "candles_1m" exists,
- * it must be dropped first and replaced with a regular table.
+ * Requires the candles_1m hypertable (see docs/data-storage/1s-base-1m-aggregate.sql).
  */
 
 import "dotenv/config";
@@ -258,27 +256,16 @@ const stats = {
 // ============================================================================
 
 /**
- * Load last CVD values from database for continuity.
- * Tries the target table first, falls back to candles_1s.
+ * Load last CVD values from candles_1m for continuity.
  */
 async function loadCvdFromDatabase(): Promise<void> {
   try {
-    let result;
-    try {
-      result = await pool.query(`
-        SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-        FROM ${TARGET_TABLE}
-        WHERE cvd_close IS NOT NULL
-        ORDER BY ticker, time DESC
-      `);
-    } catch {
-      result = await pool.query(`
-        SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
-        FROM candles_1s
-        WHERE cvd_close IS NOT NULL
-        ORDER BY ticker, time DESC
-      `);
-    }
+    const result = await pool.query(`
+      SELECT DISTINCT ON (ticker) ticker, cvd_close as cvd
+      FROM ${TARGET_TABLE}
+      WHERE cvd_close IS NOT NULL
+      ORDER BY ticker, time DESC
+    `);
 
     for (const row of result.rows) {
       const cvd = parseFloat(row.cvd) || 0;
@@ -316,7 +303,7 @@ function getOrCreateTickerState(ticker: string): TickerRollingState {
 }
 
 // ============================================================================
-// Parsing (identical to tbbo-1s.ts)
+// Parsing
 // ============================================================================
 
 /**

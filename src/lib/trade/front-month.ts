@@ -11,7 +11,7 @@
  * - Works identically for batch and live (uses data timestamps, not wall-clock)
  * - Has bounded memory (cleaned up automatically)
  *
- * Used by batch ingest scripts (tbbo-1s, tbbo-1m) and the live TbboAggregator.
+ * Used by batch ingest (tbbo-1m-1s) and the live Tbbo1mAggregator.
  */
 
 import { extractTicker } from "./symbol.js";
